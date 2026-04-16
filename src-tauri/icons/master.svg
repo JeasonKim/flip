@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="55%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#064e3b"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+
+  <!-- Top arrow → violet (Claude) -->
+  <path d="M280 390 H680 L600 310"
+        fill="none" stroke="#a78bfa" stroke-width="72"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Bottom arrow ← emerald (Codex) -->
+  <path d="M744 634 H344 L424 714"
+        fill="none" stroke="#6ee7b7" stroke-width="72"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

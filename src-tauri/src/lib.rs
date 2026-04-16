@@ -1,4 +1,10 @@
 mod commands;
+mod file_ops;
+mod profile;
+mod agent;
+mod credential;
+mod quota;
+mod session;
 
 use tauri::Manager;
 use tauri_plugin_positioner::WindowExt;
@@ -8,6 +14,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
         .setup(|app| {
+            // 仅在菜单栏托管，不显示 Dock 图标
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             // 托盘弹窗：无装饰、置顶、隐藏
             let popup = tauri::WebviewWindowBuilder::new(
                 app,
@@ -21,6 +31,10 @@ pub fn run() {
             .skip_taskbar(true)
             .visible(false)
             .build()?;
+
+            // 全屏应用上方也能显示弹窗
+            #[cfg(target_os = "macos")]
+            let _ = popup.set_visible_on_all_workspaces(true);
 
             // 失焦自动隐藏弹窗
             let popup_clone = popup.clone();
@@ -37,6 +51,7 @@ pub fn run() {
 
             if let tauri::tray::TrayIconEvent::Click {
                 button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
                 ..
             } = event
             {
@@ -62,11 +77,14 @@ pub fn run() {
             commands::dismiss_account,
             commands::detect_unsaved,
             commands::fetch_quota,
+            commands::read_model_info,
             commands::rename_account,
             commands::scan_sessions,
             commands::load_session_messages,
             commands::list_session_projects,
             commands::open_session_window,
+            commands::purge_sessions,
+            commands::reveal_config_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flip");
