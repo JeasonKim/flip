@@ -75,7 +75,7 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
-                        rect: _rect,
+                        position: _click_pos,
                         ..
                     } = event
                     {
@@ -96,14 +96,12 @@ pub fn run() {
                             );
                         }
 
-                        // Windows：任务栏在底部，弹窗向上展开到托盘图标上方
+                        // Windows：任务栏在底部，弹窗向上展开到点击位置上方
                         #[cfg(not(target_os = "macos"))]
                         {
                             if let Ok(size) = popup.outer_size() {
-                                let x = _rect.position.x as i32
-                                    + (_rect.size.width as i32 / 2)
-                                    - (size.width as i32 / 2);
-                                let y = _rect.position.y as i32 - size.height as i32;
+                                let x = _click_pos.x as i32 - (size.width as i32 / 2);
+                                let y = _click_pos.y as i32 - size.height as i32;
                                 let _ = popup.set_position(tauri::Position::Physical(
                                     tauri::PhysicalPosition::new(x, y),
                                 ));

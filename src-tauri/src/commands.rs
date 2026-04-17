@@ -378,13 +378,15 @@ pub async fn open_session_window(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     // 关闭会话窗口时切回 Accessory 策略
-    let app_handle = app.clone();
-    win.on_window_event(move |event| {
-        if let tauri::WindowEvent::Destroyed = event {
-            #[cfg(target_os = "macos")]
-            let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
-        }
-    });
+    #[cfg(target_os = "macos")]
+    {
+        let app_handle = app.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+        });
+    }
 
     Ok(())
 }

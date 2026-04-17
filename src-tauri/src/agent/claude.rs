@@ -23,6 +23,7 @@ pub fn credentials_path() -> PathBuf {
 /// macOS 上文件读不到 credentials 时，从 Keychain 补充
 pub fn snapshot_live() -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), String> {
     let settings = read_json_optional(&settings_path())?;
+    #[allow(unused_mut)]
     let mut credentials = read_json_optional(&credentials_path())?;
 
     #[cfg(target_os = "macos")]
