@@ -23,8 +23,14 @@ export default function CaptureBar({
   const [baseUrl, setBaseUrl] = useState("");
   const [enrolling, setEnrolling] = useState(false);
 
+  // 每次弹窗获焦（用户点击托盘图标）时重新检测
   useEffect(() => {
-    api.detectUnsaved(agent).then(setUnsaved).catch(() => {});
+    const check = () => {
+      api.detectUnsaved(agent).then(setUnsaved).catch(() => {});
+    };
+    check();
+    window.addEventListener("focus", check);
+    return () => window.removeEventListener("focus", check);
   }, [agent]);
 
   const handleCapture = useCallback(async () => {

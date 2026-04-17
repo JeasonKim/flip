@@ -57,7 +57,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 
 fn extract_session_meta(
     path: &PathBuf,
-    project_dir: &str,
+    fallback_project_dir: &str,
     session_id: &str,
 ) -> Option<SessionMeta> {
     // 用文件 mtime 作为最后活跃时间，避免解析文件内容中的时间戳
@@ -66,14 +66,22 @@ fn extract_session_meta(
     let file = fs::File::open(path).ok()?;
     let file_size = file.metadata().ok()?.len();
 
-    // 读取头部（前 15 行）提取标题
+    // 读取头部提取 cwd（真实项目路径）和标题
     let head_lines = read_head_lines(path, 15)?;
     let mut title: Option<String> = None;
+    let mut cwd: Option<String> = None;
 
     for line in &head_lines {
         let val: serde_json::Value = serde_json::from_str(line).ok()?;
 
         if val.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false) {
+            // 从 meta 行提取 cwd — 这是原始路径，跨平台可靠
+            if cwd.is_none() {
+                cwd = val
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
             continue;
         }
 
@@ -104,12 +112,15 @@ fn extract_session_meta(
         .or(title)
         .unwrap_or_else(|| session_id.chars().take(8).collect());
 
+    // 项目路径优先用 JSONL 中的 cwd（原始路径），fallback 到目录名解码
+    let project_dir = cwd.unwrap_or_else(|| fallback_project_dir.to_string());
+
     Some(SessionMeta {
         agent: "claude".into(),
         resume_command: Some(format!("claude --resume {}", session_id)),
         session_id: session_id.to_string(),
         title: truncate(&final_title, 80),
-        project_dir: Some(project_dir.to_string()),
+        project_dir: Some(project_dir),
         last_active_at: mtime,
         source_path: path.to_string_lossy().to_string(),
     })

@@ -90,12 +90,21 @@ fn capture_codex_account() -> Result<Account, String> {
     let label = crate::agent::codex::infer_label(&auth, &config_text, &account_type);
     let id = crate::agent::codex::generate_account_id(&account_type, &label);
 
-    // API 账号只保留 [model_providers] 段，去掉冗余的顶层字段和 [projects] 段
-    let trimmed_config = match account_type {
-        profile::AccountType::Api => config_text
-            .as_deref()
-            .map(crate::agent::codex::extract_api_config),
-        profile::AccountType::Plan => config_text,
+    // 按类型只提取必要的凭据字段
+    let (trimmed_auth, trimmed_config) = match account_type {
+        // Plan：auth 只保留 auth_mode + tokens，不保存 config（model/projects 等是用户偏好）
+        profile::AccountType::Plan => {
+            let a = auth.as_ref().map(crate::agent::codex::extract_plan_auth);
+            (a, None)
+        }
+        // API：auth 只保留 OPENAI_API_KEY，config 只保留 provider 段
+        profile::AccountType::Api => {
+            let a = auth.as_ref().map(crate::agent::codex::extract_api_auth);
+            let c = config_text
+                .as_deref()
+                .map(crate::agent::codex::extract_api_config);
+            (a, c)
+        }
     };
 
     Ok(Account {
@@ -103,7 +112,7 @@ fn capture_codex_account() -> Result<Account, String> {
         account_type,
         label,
         credentials: None,
-        auth,
+        auth: trimmed_auth,
         config: trimmed_config,
     })
 }

@@ -115,6 +115,27 @@ pub fn extract_api_config(config_text: &str) -> String {
     new_doc.to_string()
 }
 
+/// Plan 账号：只保留 auth_mode + tokens（去掉 OPENAI_API_KEY:null、last_refresh 等噪音字段）
+pub fn extract_plan_auth(auth: &serde_json::Value) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    if let Some(mode) = auth.get("auth_mode") {
+        result.insert("auth_mode".into(), mode.clone());
+    }
+    if let Some(tokens) = auth.get("tokens") {
+        result.insert("tokens".into(), tokens.clone());
+    }
+    serde_json::Value::Object(result)
+}
+
+/// API 账号：只保留 OPENAI_API_KEY
+pub fn extract_api_auth(auth: &serde_json::Value) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    if let Some(key) = auth.get("OPENAI_API_KEY") {
+        result.insert("OPENAI_API_KEY".into(), key.clone());
+    }
+    serde_json::Value::Object(result)
+}
+
 /// 将账号凭证写入 Codex 的 live 文件
 /// - auth → ~/.codex/auth.json（全量覆盖）
 /// - config → ~/.codex/config.toml（合并 provider 配置，保留其他设置）
@@ -123,9 +144,11 @@ pub fn apply_profile(account: &Account) -> Result<(), String> {
         file_ops::write_json_file(&auth_path(), auth_val)
             .map_err(|e| format!("write codex auth failed: {}", e))?;
     }
-    if let Some(saved_config) = &account.config {
-        merge_provider_config_to_live(saved_config)?;
-    }
+    // 无论 API 还是 Plan，都走 merge：
+    // - API 账号：写入保存的 model_provider + [model_providers]
+    // - Plan 账号：config 为 None → 传入空字符串 → 清除旧的 provider 配置
+    let saved_config = account.config.as_deref().unwrap_or("");
+    merge_provider_config_to_live(saved_config)?;
     Ok(())
 }
 
@@ -405,5 +428,31 @@ base_url = "https://api.com/v1"
             .unwrap()
             .get("provider_a")
             .is_some());
+    }
+
+    #[test]
+    fn merge_empty_saved_clears_provider_fields() {
+        let live = r#"
+model = "o3"
+model_provider = "old_provider"
+model_reasoning_effort = "high"
+
+[model_providers.old_provider]
+base_url = "https://old.api.com/v1"
+"#;
+        // Plan 账号没有 config → 传入空字符串
+        let merged = merge_toml_provider_fields(live, "").unwrap();
+        let doc = merged.parse::<toml_edit::DocumentMut>().unwrap();
+
+        // provider 相关字段已清除
+        assert!(doc.get("model_provider").is_none());
+        assert!(doc.get("model_providers").is_none());
+
+        // 其他设置保留
+        assert_eq!(doc.get("model").unwrap().as_str().unwrap(), "o3");
+        assert_eq!(
+            doc.get("model_reasoning_effort").unwrap().as_str().unwrap(),
+            "high"
+        );
     }
 }
