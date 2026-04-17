@@ -117,6 +117,7 @@ fn extract_session_meta(path: &PathBuf, fname: &str) -> Option<SessionMeta> {
 
     Some(SessionMeta {
         agent: "codex".into(),
+        resume_command: Some(format!("codex resume {}", session_id)),
         session_id,
         title: final_title,
         project_dir,

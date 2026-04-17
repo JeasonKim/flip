@@ -23,6 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 url = "2"
 open = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["fs"] }
 thiserror = "2"
 log = "0.4"

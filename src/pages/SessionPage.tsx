@@ -1,28 +1,23 @@
 import { useCallback, useState } from "react";
-import type { SessionMeta } from "../types/profile";
+import type { AgentId, SessionMeta } from "../types/profile";
 import { useSessions } from "../hooks/useSessions";
 import { purgeSessions } from "../lib/invoke";
-import ProjectFilter from "../components/session/ProjectFilter";
 import SessionList from "../components/session/SessionList";
 import SessionDetail from "../components/session/SessionDetail";
 
 function SessionPage() {
   const {
     sessions,
-    projects,
     loading,
     hasMore,
     agentFilter,
     setAgentFilter,
-    projectFilter,
-    setProjectFilter,
     loadMore,
     refresh,
   } = useSessions();
 
   const [selected, setSelected] = useState<SessionMeta | null>(null);
   const [purgeResult, setPurgeResult] = useState<string | null>(null);
-  // 两次点击确认：第一次点击记录天数，3 秒内再点才执行
   const [confirmingPurge, setConfirmingPurge] = useState<number | null>(null);
 
   const handlePurge = useCallback(
@@ -48,17 +43,39 @@ function SessionPage() {
 
   return (
     <div className="h-screen bg-gray-900 text-white flex flex-col">
-      {/* 顶部筛选栏 */}
+      {/* 顶部栏：Agent 切换 + 清理按钮 */}
       <div className="shrink-0 border-b border-white/10 px-4 py-3 flex items-center gap-3">
-        <div className="flex-1">
-          <ProjectFilter
-            projects={projects}
-            agentFilter={agentFilter}
-            projectFilter={projectFilter}
-            onAgentChange={setAgentFilter}
-            onProjectChange={setProjectFilter}
-          />
+        {/* Agent 切换 */}
+        <div className="flex items-center gap-1 bg-white/5 rounded-lg p-0.5">
+          {(["all", "claude", "codex"] as const).map((val) => {
+            const isActive =
+              val === "all" ? !agentFilter : agentFilter === val;
+            return (
+              <button
+                key={val}
+                onClick={() =>
+                  setAgentFilter(
+                    val === "all" ? undefined : (val as AgentId),
+                  )
+                }
+                className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                  isActive
+                    ? "bg-white/15 text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                {val === "all"
+                  ? "All"
+                  : val === "claude"
+                    ? "Claude"
+                    : "Codex"}
+              </button>
+            );
+          })}
         </div>
+
+        <div className="flex-1" />
+
         <div className="flex items-center gap-2 shrink-0">
           {purgeResult && (
             <span className="text-[11px] text-emerald-400 animate-pulse">
@@ -116,10 +133,7 @@ function SessionPage() {
         {/* 消息详情 */}
         <div className="flex-1 p-4 overflow-hidden">
           {selected ? (
-            <SessionDetail
-              key={selected.session_id}
-              session={selected}
-            />
+            <SessionDetail key={selected.session_id} session={selected} />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">
               Select a session to view messages

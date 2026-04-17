@@ -55,13 +55,11 @@ export async function renameAccount(
 
 export async function scanSessions(
   agentFilter?: AgentId,
-  projectFilter?: string,
   offset = 0,
   limit = 20,
 ): Promise<SessionMeta[]> {
   return invoke<SessionMeta[]>("scan_sessions", {
     agentFilter: agentFilter ?? null,
-    projectFilter: projectFilter ?? null,
     offset,
     limit,
   });
@@ -77,12 +75,36 @@ export async function loadSessionMessages(
   });
 }
 
-export async function listSessionProjects(): Promise<string[]> {
-  return invoke<string[]>("list_session_projects");
+export async function resumeSession(
+  command: string,
+  cwd?: string,
+): Promise<void> {
+  return invoke("resume_session", { command, cwd: cwd ?? null });
 }
 
 export async function purgeSessions(olderThanDays: number): Promise<number> {
   return invoke<number>("purge_sessions", { olderThanDays });
+}
+
+export async function importFromCcswitch(): Promise<{
+  imported: number;
+  skipped: number;
+}> {
+  return invoke("import_from_ccswitch");
+}
+
+export async function enrollApiAccount(
+  agent: AgentId,
+  label: string,
+  apiKey: string,
+  baseUrl?: string,
+): Promise<Account> {
+  return invoke<Account>("enroll_api_account", {
+    agent,
+    label,
+    apiKey,
+    baseUrl: baseUrl ?? null,
+  });
 }
 
 export async function openSessionWindow(): Promise<void> {

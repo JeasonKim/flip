@@ -328,13 +328,11 @@ pub async fn rename_account(
 #[tauri::command]
 pub async fn scan_sessions(
     agent_filter: Option<String>,
-    project_filter: Option<String>,
     offset: usize,
     limit: usize,
 ) -> Result<Vec<session::SessionMeta>, String> {
     Ok(session::scan_sessions(
         agent_filter.as_deref(),
-        project_filter.as_deref(),
         offset,
         limit,
     ))
@@ -348,9 +346,12 @@ pub async fn load_session_messages(
     session::load_messages(&agent, &source_path)
 }
 
+/// 在终端中恢复会话
 #[tauri::command]
-pub async fn list_session_projects() -> Result<Vec<String>, String> {
-    Ok(session::list_projects())
+pub async fn resume_session(command: String, cwd: Option<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || session::launch_terminal(&command, cwd.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -393,6 +394,33 @@ pub async fn open_session_window(app: tauri::AppHandle) -> Result<(), String> {
 pub async fn purge_sessions(older_than_days: u32) -> Result<u32, String> {
     let count = session::purge_sessions(older_than_days);
     Ok(count as u32)
+}
+
+/// 从 CC Switch 导入账号
+#[tauri::command]
+pub async fn import_from_ccswitch() -> Result<serde_json::Value, String> {
+    let result = crate::import::import_from_ccswitch()?;
+    serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// 手动添加 API 账号
+#[tauri::command]
+pub async fn enroll_api_account(
+    agent: String,
+    label: String,
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let agent_type: profile::AgentType = agent.parse()?;
+    let mut config = profile::load_profiles();
+    let account = crate::import::enroll_api_account(
+        &mut config,
+        agent_type,
+        label,
+        api_key,
+        base_url,
+    )?;
+    serde_json::to_value(&account).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

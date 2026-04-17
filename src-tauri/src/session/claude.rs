@@ -106,28 +106,13 @@ fn extract_session_meta(
 
     Some(SessionMeta {
         agent: "claude".into(),
+        resume_command: Some(format!("claude --resume {}", session_id)),
         session_id: session_id.to_string(),
         title: truncate(&final_title, 80),
         project_dir: Some(project_dir.to_string()),
         last_active_at: mtime,
         source_path: path.to_string_lossy().to_string(),
     })
-}
-
-/// 从目录名快速提取项目列表，无需解析文件
-pub fn list_project_dirs() -> Vec<String> {
-    let base = projects_dir();
-    if !base.exists() {
-        return vec![];
-    }
-    let Ok(entries) = fs::read_dir(&base) else {
-        return vec![];
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| decode_project_dir(&e.file_name().to_string_lossy()))
-        .collect()
 }
 
 /// 删除 mtime 早于 cutoff 的会话文件

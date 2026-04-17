@@ -8,13 +8,10 @@ const REFRESH_INTERVAL = 10000;
 
 export function useSessions() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
-  const [projects, setProjects] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
 
-  // 筛选条件
   const [agentFilter, setAgentFilter] = useState<AgentId | undefined>();
-  const [projectFilter, setProjectFilter] = useState<string | undefined>();
 
   // 当前已加载的总条数，用于静默刷新时保持范围一致
   const loadedCountRef = useRef(PAGE_SIZE);
@@ -22,30 +19,25 @@ export function useSessions() {
   const loadInitial = useCallback(async () => {
     setLoading(true);
     try {
-      const [data, allProjects] = await Promise.all([
-        api.scanSessions(agentFilter, projectFilter, 0, PAGE_SIZE),
-        api.listSessionProjects(),
-      ]);
+      const data = await api.scanSessions(agentFilter, 0, PAGE_SIZE);
       setSessions(data);
-      setProjects(allProjects);
       setHasMore(data.length >= PAGE_SIZE);
       loadedCountRef.current = data.length;
     } finally {
       setLoading(false);
     }
-  }, [agentFilter, projectFilter]);
+  }, [agentFilter]);
 
   const loadMore = useCallback(async () => {
     const data = await api.scanSessions(
       agentFilter,
-      projectFilter,
       sessions.length,
       PAGE_SIZE,
     );
     setSessions((prev) => [...prev, ...data]);
     setHasMore(data.length >= PAGE_SIZE);
     loadedCountRef.current = sessions.length + data.length;
-  }, [agentFilter, projectFilter, sessions.length]);
+  }, [agentFilter, sessions.length]);
 
   useEffect(() => {
     loadInitial();
@@ -56,7 +48,7 @@ export function useSessions() {
     const timer = setInterval(async () => {
       try {
         const count = Math.max(loadedCountRef.current, PAGE_SIZE);
-        const data = await api.scanSessions(agentFilter, projectFilter, 0, count);
+        const data = await api.scanSessions(agentFilter, 0, count);
         setSessions(data);
         setHasMore(data.length >= count);
       } catch {
@@ -64,17 +56,14 @@ export function useSessions() {
       }
     }, REFRESH_INTERVAL);
     return () => clearInterval(timer);
-  }, [agentFilter, projectFilter]);
+  }, [agentFilter]);
 
   return {
     sessions,
-    projects,
     loading,
     hasMore,
     agentFilter,
     setAgentFilter,
-    projectFilter,
-    setProjectFilter,
     loadMore,
     refresh: loadInitial,
   };

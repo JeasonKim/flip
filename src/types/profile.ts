@@ -40,6 +40,7 @@ export interface SessionMeta {
   project_dir: string | null;
   last_active_at: number | null;
   source_path: string;
+  resume_command: string | null;
 }
 
 export interface SessionMessage {

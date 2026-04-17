@@ -19,6 +19,7 @@ interface AgentSectionProps {
   onFlip: (agent: AgentId, accountId: string) => Promise<void>;
   onCapture: (agent: AgentId) => Promise<void>;
   onDismiss: (agent: AgentId, accountId: string) => Promise<void>;
+  onAccountChanged?: () => void;
 }
 
 export default function AgentSection({
@@ -27,6 +28,7 @@ export default function AgentSection({
   onFlip,
   onCapture,
   onDismiss,
+  onAccountChanged,
 }: AgentSectionProps) {
   const [expanded, setExpanded] = useState(true);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
@@ -110,8 +112,12 @@ export default function AgentSection({
               </div>
             )}
 
-            {/* Capture Current */}
-            <CaptureBar agent={agent} onCapture={onCapture} />
+            {/* Capture / 手动添加 */}
+            <CaptureBar
+              agent={agent}
+              onCapture={onCapture}
+              onEnrolled={onAccountChanged}
+            />
           </motion.div>
         )}
       </AnimatePresence>

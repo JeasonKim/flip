@@ -22,6 +22,8 @@ pub struct SessionMeta {
     pub last_active_at: Option<i64>,
     /// JSONL 文件的完整路径
     pub source_path: String,
+    /// 恢复会话的 CLI 命令
+    pub resume_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,10 +33,9 @@ pub struct SessionMessage {
     pub timestamp: Option<i64>,
 }
 
-/// 扫描会话列表，支持分页和筛选
+/// 扫描会话列表，支持分页和 agent 筛选
 pub fn scan_sessions(
     agent_filter: Option<&str>,
-    project_filter: Option<&str>,
     offset: usize,
     limit: usize,
 ) -> Vec<SessionMeta> {
@@ -48,16 +49,6 @@ pub fn scan_sessions(
     }
     if scan_codex {
         all.extend(codex::scan_sessions());
-    }
-
-    // 按项目筛选
-    if let Some(project) = project_filter {
-        all.retain(|s| {
-            s.project_dir
-                .as_deref()
-                .map(|p| p.contains(project))
-                .unwrap_or(false)
-        });
     }
 
     // 按最后活跃时间排序（降序）
@@ -76,20 +67,6 @@ pub fn load_messages(agent: &str, source_path: &str) -> Result<Vec<SessionMessag
     }
 }
 
-/// 去重提取所有项目目录
-pub fn list_projects() -> Vec<String> {
-    // Claude 项目目录可直接从目录名解码，无需解析文件
-    let mut projects = claude::list_project_dirs();
-
-    // Codex 项目目录在文件头部 session_meta 中，需要扫描
-    let codex_sessions = codex::scan_sessions();
-    projects.extend(codex_sessions.into_iter().filter_map(|s| s.project_dir));
-
-    projects.sort();
-    projects.dedup();
-    projects
-}
-
 /// 删除指定天数之前的会话文件
 pub fn purge_sessions(older_than_days: u32) -> usize {
     let now_millis = std::time::SystemTime::now()
@@ -98,4 +75,58 @@ pub fn purge_sessions(older_than_days: u32) -> usize {
         .as_millis() as i64;
     let cutoff = now_millis - (older_than_days as i64) * 24 * 60 * 60 * 1000;
     claude::purge_sessions(cutoff) + codex::purge_sessions(cutoff)
+}
+
+/// 在终端中启动恢复命令
+pub fn launch_terminal(command: &str, cwd: Option<&str>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return launch_macos_terminal(command, cwd);
+
+    #[cfg(target_os = "windows")]
+    return launch_windows_terminal(command, cwd);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (command, cwd);
+        Err("terminal launch not supported on this platform".into())
+    }
+}
+
+/// macOS：通过 AppleScript 在 Terminal.app 中执行命令
+#[cfg(target_os = "macos")]
+fn launch_macos_terminal(command: &str, cwd: Option<&str>) -> Result<(), String> {
+    let full_command = match cwd {
+        Some(dir) => format!("cd \"{}\" && {}", dir, command),
+        None => command.to_string(),
+    };
+    let escaped = full_command.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"tell application "Terminal"
+    activate
+    do script "{}"
+end tell"#,
+        escaped
+    );
+    let status = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .status()
+        .map_err(|e| format!("failed to launch terminal: {}", e))?;
+    if !status.success() {
+        return Err("osascript exited with error".into());
+    }
+    Ok(())
+}
+
+/// Windows：在 cmd.exe 新窗口中执行命令
+#[cfg(target_os = "windows")]
+fn launch_windows_terminal(command: &str, cwd: Option<&str>) -> Result<(), String> {
+    let full_command = match cwd {
+        Some(dir) => format!("cd /d \"{}\" && {}", dir, command),
+        None => command.to_string(),
+    };
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "cmd", "/k", &full_command])
+        .spawn()
+        .map_err(|e| format!("failed to launch terminal: {}", e))?;
+    Ok(())
 }

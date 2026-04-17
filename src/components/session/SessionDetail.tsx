@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionMeta } from "../../types/profile";
 import { useSessionMessages } from "../../hooks/useSessions";
+import { resumeSession } from "../../lib/invoke";
 import MessageBubble from "./MessageBubble";
 
 interface SessionDetailProps {
@@ -75,9 +76,32 @@ export default function SessionDetail({ session }: SessionDetailProps) {
     <div className="flex flex-col h-full relative">
       {/* 头部信息 */}
       <div className="shrink-0 border-b border-white/10 pb-3 mb-3">
-        <h2 className="text-base font-semibold text-gray-100 truncate">
-          {session.title}
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-gray-100 truncate flex-1">
+            {session.title}
+          </h2>
+          {session.resume_command && (
+            <button
+              onClick={async () => {
+                try {
+                  await resumeSession(
+                    session.resume_command!,
+                    session.project_dir ?? undefined,
+                  );
+                } catch {
+                  // fallback：复制命令到剪贴板
+                  await navigator.clipboard.writeText(
+                    session.resume_command!,
+                  );
+                }
+              }}
+              className="shrink-0 px-3 py-1 text-[11px] bg-white/10 hover:bg-white/20 text-gray-300 rounded-md transition-colors"
+              title={session.resume_command}
+            >
+              ▶ 恢复
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-3 mt-1 text-[11px] text-gray-500">
           <span
             className={`uppercase font-bold ${

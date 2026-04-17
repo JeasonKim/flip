@@ -2,6 +2,7 @@ mod agent;
 mod commands;
 mod credential;
 mod file_ops;
+mod import;
 mod profile;
 mod quota;
 mod session;
@@ -145,9 +146,11 @@ pub fn run() {
             commands::rename_account,
             commands::scan_sessions,
             commands::load_session_messages,
-            commands::list_session_projects,
+            commands::resume_session,
             commands::open_session_window,
             commands::purge_sessions,
+            commands::import_from_ccswitch,
+            commands::enroll_api_account,
             commands::reveal_config_file,
         ])
         .run(tauri::generate_context!())

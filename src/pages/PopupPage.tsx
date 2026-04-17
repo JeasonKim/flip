@@ -7,7 +7,8 @@ import type { AgentId } from "../types/profile";
 const AGENTS: AgentId[] = ["claude", "codex"];
 
 function PopupPage() {
-  const { config, loading, error, flip, capture, dismiss } = useProfiles();
+  const { config, loading, error, reload, flip, capture, dismiss } =
+    useProfiles();
 
   if (loading || !config) {
     return (
@@ -40,11 +41,12 @@ function PopupPage() {
             await capture(a);
           }}
           onDismiss={dismiss}
+          onAccountChanged={reload}
         />
       ))}
 
       <div className="mt-auto">
-        <Footer />
+        <Footer onImported={reload} />
       </div>
     </motion.div>
   );
