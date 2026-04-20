@@ -118,13 +118,18 @@ impl FlipConfig {
         }
     }
 
-    /// 添加新账号
+    /// 添加或更新账号（ID 重复时更新凭据，而非拒绝）
     pub fn enroll_account(&mut self, agent: AgentType, account: Account) -> Result<(), String> {
         let cfg = self.agent_config_mut(agent);
-        if cfg.accounts.iter().any(|a| a.id == account.id) {
-            return Err(format!("account '{}' already exists", account.id));
+        if let Some(existing) = cfg.accounts.iter_mut().find(|a| a.id == account.id) {
+            // ID 已存在：更新凭据和标签（token 刷新等场景）
+            existing.label = account.label;
+            existing.credentials = account.credentials;
+            existing.auth = account.auth;
+            existing.config = account.config;
+            return Ok(());
         }
-        // 如果是第一个账号，自动设为当前
+        // 第一个账号自动设为当前
         if cfg.accounts.is_empty() {
             cfg.current = Some(account.id.clone());
         }
@@ -140,19 +145,15 @@ impl FlipConfig {
         if cfg.accounts.len() == before {
             return Err(format!("account '{}' not found", account_id));
         }
-        // 如果删的是当前激活账号，切到第一个
+        // 如果删的是当前激活账号，先清空，后续由 live 配置决定是否需要重新对齐
         if cfg.current.as_deref() == Some(account_id) {
-            cfg.current = cfg.accounts.first().map(|a| a.id.clone());
+            cfg.current = None;
         }
         Ok(())
     }
 
     /// 设置当前激活账号
-    pub fn designate_active(
-        &mut self,
-        agent: AgentType,
-        account_id: &str,
-    ) -> Result<(), String> {
+    pub fn designate_active(&mut self, agent: AgentType, account_id: &str) -> Result<(), String> {
         let cfg = self.agent_config_mut(agent);
         if !cfg.accounts.iter().any(|a| a.id == account_id) {
             return Err(format!("account '{}' not found", account_id));
@@ -211,15 +212,21 @@ mod tests {
     }
 
     #[test]
-    fn enroll_duplicate_rejected() {
+    fn enroll_duplicate_updates_credentials() {
         let mut cfg = FlipConfig::default();
         let acc = sample_account("dup", AccountType::Api);
-        cfg.enroll_account(AgentType::Claude, acc.clone()).unwrap();
-        assert!(cfg.enroll_account(AgentType::Claude, acc).is_err());
+        cfg.enroll_account(AgentType::Claude, acc).unwrap();
+
+        // 同 ID 再次注册：应更新 label 而非报错
+        let mut updated = sample_account("dup", AccountType::Api);
+        updated.label = "Updated Label".into();
+        cfg.enroll_account(AgentType::Claude, updated).unwrap();
+        assert_eq!(cfg.claude.accounts.len(), 1);
+        assert_eq!(cfg.claude.accounts[0].label, "Updated Label");
     }
 
     #[test]
-    fn dismiss_active_falls_back() {
+    fn dismiss_active_clears_current() {
         let mut cfg = FlipConfig::default();
         cfg.enroll_account(AgentType::Codex, sample_account("a", AccountType::Plan))
             .unwrap();
@@ -227,8 +234,7 @@ mod tests {
             .unwrap();
         cfg.designate_active(AgentType::Codex, "a").unwrap();
         cfg.dismiss_account(AgentType::Codex, "a").unwrap();
-        // 应 fallback 到第一个剩余账号
-        assert_eq!(cfg.codex.current.as_deref(), Some("b"));
+        assert_eq!(cfg.codex.current, None);
     }
 
     #[test]
@@ -242,11 +248,8 @@ mod tests {
     #[test]
     fn rename_account_works() {
         let mut cfg = FlipConfig::default();
-        cfg.enroll_account(
-            AgentType::Claude,
-            sample_account("test", AccountType::Api),
-        )
-        .unwrap();
+        cfg.enroll_account(AgentType::Claude, sample_account("test", AccountType::Api))
+            .unwrap();
         cfg.rename_account(AgentType::Claude, "test", "New Name")
             .unwrap();
         assert_eq!(cfg.claude.accounts[0].label, "New Name");
@@ -272,9 +275,6 @@ mod tests {
         let restored: FlipConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(restored.claude.accounts.len(), 1);
         assert_eq!(restored.claude.accounts[0].id, "user@test.com");
-        assert_eq!(
-            restored.claude.accounts[0].account_type,
-            AccountType::Plan
-        );
+        assert_eq!(restored.claude.accounts[0].account_type, AccountType::Plan);
     }
 }

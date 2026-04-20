@@ -60,7 +60,12 @@ pub async fn fetch_claude_quota(access_token: &str) -> QuotaResult {
     };
 
     // 只展示明确有意义的 tier，忽略实验性/内部 tier
-    let display_tiers = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"];
+    let display_tiers = [
+        "five_hour",
+        "seven_day",
+        "seven_day_opus",
+        "seven_day_sonnet",
+    ];
     let mut tiers = Vec::new();
 
     for tier_name in &display_tiers {

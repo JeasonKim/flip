@@ -74,14 +74,15 @@ fn extract_session_meta(
     for line in &head_lines {
         let val: serde_json::Value = serde_json::from_str(line).ok()?;
 
+        // 从任意行提取 cwd — meta 行和消息行都可能带有此字段
+        if cwd.is_none() {
+            cwd = val
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+
         if val.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false) {
-            // 从 meta 行提取 cwd — 这是原始路径，跨平台可靠
-            if cwd.is_none() {
-                cwd = val
-                    .get("cwd")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
             continue;
         }
 
@@ -202,7 +203,11 @@ pub fn parse_messages(source_path: &str) -> Result<Vec<SessionMessage>, String> 
             }
 
             // tool_use / tool_result 映射到 tool role
-            let final_role = if content.starts_with("[Tool") { "tool".into() } else { role };
+            let final_role = if content.starts_with("[Tool") {
+                "tool".into()
+            } else {
+                role
+            };
 
             messages.push(SessionMessage {
                 role: final_role,
@@ -240,10 +245,7 @@ fn extract_content(msg: &serde_json::Value) -> String {
                         parts.push(format!("[Tool: {}] {}", name, input));
                     }
                     Some("tool_result") => {
-                        let content = block
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let content = block.get("content").and_then(|v| v.as_str()).unwrap_or("");
                         parts.push(format!("[Tool Result] {}", content));
                     }
                     _ => {}
@@ -359,10 +361,7 @@ mod tests {
     #[test]
     fn decode_project_dir_converts() {
         let sep = std::path::MAIN_SEPARATOR_STR;
-        let expected = format!(
-            "{0}Users{0}jinjianxun{0}code{0}personal{0}flip",
-            sep
-        );
+        let expected = format!("{0}Users{0}jinjianxun{0}code{0}personal{0}flip", sep);
         assert_eq!(
             decode_project_dir("-Users-jinjianxun-code-personal-flip"),
             expected

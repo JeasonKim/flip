@@ -1,17 +1,25 @@
 mod agent;
 mod commands;
 mod credential;
+mod current_account;
 mod file_ops;
 mod import;
 mod profile;
 mod quota;
 mod session;
+mod tray_panel;
 
+use crate::tray_panel::{
+    calculate_macos_popup_origin, resolve_tray_panel_visibility_change, PopupFrameSize,
+    TrayAnchorFrame, TrayPanelVisibilityChange, WorkAreaFrame,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
-#[cfg(target_os = "macos")]
-use tauri_plugin_positioner::WindowExt;
+
+/// 托盘图标的选中态：仅由左键点击切换，用它决定面板是否应该显示。
+static TRAY_ICON_SELECTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,17 +44,9 @@ pub fn run() {
             .visible(false)
             .build()?;
 
-            // macOS：全屏应用上方也能显示弹窗
+            // macOS：设置窗口层级和集合行为，确保全屏空间下面板不被系统隐藏
             #[cfg(target_os = "macos")]
-            let _ = popup.set_visible_on_all_workspaces(true);
-
-            // 失焦自动隐藏弹窗
-            let popup_clone = popup.clone();
-            popup.on_window_event(move |event| {
-                if let tauri::WindowEvent::Focused(false) = event {
-                    let _ = popup_clone.hide();
-                }
-            });
+            setup_macos_panel(&popup);
 
             // 托盘右键菜单
             let menu = Menu::with_items(
@@ -72,44 +72,42 @@ pub fn run() {
                     let app = tray.app_handle();
                     tauri_plugin_positioner::on_tray_event(app, &event);
 
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        position: _click_pos,
-                        ..
-                    } = event
-                    {
-                        let Some(popup) = app.get_webview_window("popup") else {
-                            return;
-                        };
-                        let visible = popup.is_visible().unwrap_or(false);
-                        if visible {
-                            let _ = popup.hide();
-                            return;
-                        }
+                    match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            position: click_pos,
+                            rect: tray_rect,
+                            ..
+                        } => {
+                            let Some(popup) = app.get_webview_window("popup") else {
+                                log::warn!(
+                                    "[tray-panel] popup window missing when toggling tray selection"
+                                );
+                                sync_tray_icon_selection(tray, false);
+                                return;
+                            };
 
-                        // macOS：菜单栏在顶部，弹窗向下展开
-                        #[cfg(target_os = "macos")]
-                        {
-                            let _ = popup.move_window(
-                                tauri_plugin_positioner::Position::TrayBottomCenter,
-                            );
-                        }
-
-                        // Windows：任务栏在底部，弹窗向上展开到点击位置上方
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            if let Ok(size) = popup.outer_size() {
-                                let x = _click_pos.x as i32 - (size.width as i32 / 2);
-                                let y = _click_pos.y as i32 - size.height as i32;
-                                let _ = popup.set_position(tauri::Position::Physical(
-                                    tauri::PhysicalPosition::new(x, y),
-                                ));
+                            match resolve_tray_panel_visibility_change(
+                                TRAY_ICON_SELECTED.load(Ordering::SeqCst),
+                            ) {
+                                TrayPanelVisibilityChange::Show => {
+                                    if show_popup(&popup, click_pos, tray_rect) {
+                                        sync_tray_icon_selection(tray, true);
+                                        TRAY_ICON_SELECTED.store(true, Ordering::SeqCst);
+                                    } else {
+                                        sync_tray_icon_selection(tray, false);
+                                    }
+                                }
+                                TrayPanelVisibilityChange::Hide => {
+                                    if hide_popup(&popup) {
+                                        sync_tray_icon_selection(tray, false);
+                                        TRAY_ICON_SELECTED.store(false, Ordering::SeqCst);
+                                    }
+                                }
                             }
                         }
-
-                        let _ = popup.show();
-                        let _ = popup.set_focus();
+                        _ => {}
                     }
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -138,6 +136,7 @@ pub fn run() {
             commands::flip_account,
             commands::capture_current,
             commands::dismiss_account,
+            commands::sync_credentials,
             commands::detect_unsaved,
             commands::fetch_quota,
             commands::read_model_info,
@@ -153,4 +152,153 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flip");
+}
+
+fn show_popup(
+    popup: &tauri::WebviewWindow,
+    click_pos: tauri::PhysicalPosition<f64>,
+    tray_rect: tauri::Rect,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    let _ = click_pos;
+    #[cfg(not(target_os = "macos"))]
+    let _ = tray_rect;
+
+    // macOS：菜单栏在顶部，弹窗向下展开
+    #[cfg(target_os = "macos")]
+    {
+        let popup_size = match popup.outer_size() {
+            Ok(size) => PopupFrameSize::from(size),
+            Err(err) => {
+                log::warn!("[tray-panel] failed to read popup size before showing on macOS: {err}");
+                return false;
+            }
+        };
+        let tray_anchor = TrayAnchorFrame::from(tray_rect);
+        let work_area = popup
+            .monitor_from_point(
+                f64::from(tray_anchor.x + (tray_anchor.width / 2)),
+                f64::from(tray_anchor.y + (tray_anchor.height / 2)),
+            )
+            .ok()
+            .flatten()
+            .map(|monitor| WorkAreaFrame::from(monitor.work_area()));
+        let popup_origin = calculate_macos_popup_origin(tray_anchor, popup_size, work_area);
+
+        if let Err(err) = popup.set_position(tauri::Position::Physical(popup_origin.into())) {
+            log::warn!("[tray-panel] failed to position popup below tray icon on macOS: {err}");
+        }
+    }
+
+    // Windows：任务栏在底部，弹窗向上展开到点击位置上方
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Ok(size) = popup.outer_size() {
+            let x = click_pos.x as i32 - (size.width as i32 / 2);
+            let y = click_pos.y as i32 - size.height as i32;
+            if let Err(err) = popup.set_position(tauri::Position::Physical(
+                tauri::PhysicalPosition::new(x, y),
+            )) {
+                log::warn!(
+                    "[tray-panel] failed to position popup above tray icon x={x} y={y}: {err}"
+                );
+            }
+        } else {
+            log::warn!("[tray-panel] failed to read popup size before showing");
+        }
+    }
+
+    if let Err(err) = popup.show() {
+        log::warn!("[tray-panel] failed to show popup after selecting tray icon: {err}");
+        return false;
+    }
+
+    // Windows：保持“任务栏图标被选中 → 面板显示”的简单切换语义，不主动抢焦点。
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(err) = popup.set_focus() {
+            log::warn!("[tray-panel] failed to focus popup after showing: {err}");
+        }
+    }
+
+    true
+}
+
+fn hide_popup(popup: &tauri::WebviewWindow) -> bool {
+    if let Err(err) = popup.hide() {
+        log::warn!("[tray-panel] failed to hide popup after unselecting tray icon: {err}");
+        return false;
+    }
+
+    true
+}
+
+fn sync_tray_icon_selection<R: tauri::Runtime>(tray: &tauri::tray::TrayIcon<R>, is_selected: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc::sel;
+        use objc::sel_impl;
+
+        if let Err(err) = tray.with_inner_tray_icon(move |inner| {
+            if let Some(status_item) = inner.ns_status_item() {
+                unsafe {
+                    let status_item_ptr =
+                        (&*status_item) as *const _ as *mut objc::runtime::Object;
+                    let button: *mut objc::runtime::Object =
+                        objc::msg_send![status_item_ptr, button];
+                    if button.is_null() {
+                        log::warn!(
+                            "[tray-panel] tray status button missing when syncing selected={is_selected}"
+                        );
+                        return;
+                    }
+                    let _: () = objc::msg_send![button, highlight: is_selected];
+                }
+            } else {
+                log::warn!(
+                    "[tray-panel] tray status item missing when syncing selected={is_selected}"
+                );
+            }
+        }) {
+            log::warn!("[tray-panel] failed to sync tray icon selected={is_selected}: {err}");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (tray, is_selected);
+}
+
+/// macOS：配置窗口层级和集合行为，让面板在全屏空间中正常显示
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn setup_macos_panel(window: &tauri::WebviewWindow) {
+    use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
+    use objc::sel;
+    use objc::sel_impl;
+
+    let _ = window.set_visible_on_all_workspaces(true);
+
+    let ns_window = match window.ns_window() {
+        Ok(ptr) => ptr as cocoa::base::id,
+        Err(_) => return,
+    };
+    unsafe {
+        // 窗口层级：101（popUpMenu），高于全屏 app 和菜单栏
+        ns_window.setLevel_(101);
+
+        // Accessory 模式下 app 会被系统 deactivate → 窗口自动隐藏
+        // 关闭此行为，让面板在 app 失去焦点时仍然可见
+        let no: cocoa::base::BOOL = cocoa::base::NO;
+        let _: () = objc::msg_send![ns_window, setHidesOnDeactivate: no];
+
+        // 集合行为：
+        // - canJoinAllSpaces(1<<0): 所有桌面空间可见
+        // - stationary(1<<4): 切换空间时不跟随移动
+        // - ignoresCycle(1<<6): 不参与 Cmd+Tab 切换
+        // - fullScreenAuxiliary(1<<8): 允许在全屏空间中显示
+        let behavior = NSWindowCollectionBehavior::from_bits_truncate(
+            (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8),
+        );
+        ns_window.setCollectionBehavior_(behavior);
+    }
 }

@@ -244,10 +244,7 @@ pub fn parse_messages(source_path: &str) -> Result<Vec<SessionMessage>, String> 
                 });
             }
             "function_call_output" => {
-                let output = payload
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
                 messages.push(SessionMessage {
                     role: "tool".into(),
                     content: output.to_string(),

@@ -12,7 +12,7 @@ function PopupPage() {
 
   if (loading || !config) {
     return (
-      <div className="min-h-screen bg-gray-900/80 backdrop-blur-xl flex items-center justify-center">
+      <div className="h-screen bg-gray-900/80 backdrop-blur-xl flex items-center justify-center">
         <span className="text-gray-500 text-sm animate-pulse">Loading...</span>
       </div>
     );
@@ -23,29 +23,31 @@ function PopupPage() {
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.15 }}
-      className="min-h-screen bg-gray-900/80 backdrop-blur-xl p-4 text-white flex flex-col gap-4"
+      className="h-screen bg-gray-900/80 backdrop-blur-xl p-4 text-white flex flex-col overflow-hidden"
     >
-      {error && (
-        <p className="text-xs text-red-400 bg-red-500/10 rounded px-2 py-1">
-          {error}
-        </p>
-      )}
+      <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-4">
+        {error && (
+          <p className="text-xs text-red-400 bg-red-500/10 rounded px-2 py-1">
+            {error}
+          </p>
+        )}
 
-      {AGENTS.map((agent) => (
-        <AgentSection
-          key={agent}
-          agent={agent}
-          agentConfig={config[agent]}
-          onFlip={flip}
-          onCapture={async (a: AgentId) => {
-            await capture(a);
-          }}
-          onDismiss={dismiss}
-          onAccountChanged={reload}
-        />
-      ))}
+        {AGENTS.map((agent) => (
+          <AgentSection
+            key={agent}
+            agent={agent}
+            agentConfig={config[agent]}
+            onFlip={flip}
+            onCapture={async (a: AgentId) => {
+              await capture(a);
+            }}
+            onDismiss={dismiss}
+            onAccountChanged={reload}
+          />
+        ))}
+      </div>
 
-      <div className="mt-auto">
+      <div className="shrink-0">
         <Footer onImported={reload} />
       </div>
     </motion.div>

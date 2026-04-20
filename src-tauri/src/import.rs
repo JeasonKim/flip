@@ -22,11 +22,9 @@ pub fn import_from_ccswitch() -> Result<ImportResult, String> {
         return Err("未找到 CC Switch 数据库 (~/.cc-switch/cc-switch.db)".into());
     }
 
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| format!("打开数据库失败: {}", e))?;
+    let conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("打开数据库失败: {}", e))?;
 
     let mut stmt = conn
         .prepare("SELECT id, app_type, name, settings_config, is_current FROM providers")
@@ -61,8 +59,18 @@ pub fn import_from_ccswitch() -> Result<ImportResult, String> {
             }
         };
 
-        let settings: serde_json::Value =
-            serde_json::from_str(&settings_json).unwrap_or_default();
+        let settings: serde_json::Value = match serde_json::from_str(&settings_json) {
+            Ok(settings) => settings,
+            Err(err) => {
+                log::warn!(
+                    "[import] failed to parse provider settings id={} app_type={}: {}. Imported with empty settings.",
+                    id,
+                    app_type,
+                    err
+                );
+                serde_json::Value::Object(serde_json::Map::new())
+            }
+        };
 
         let account = match agent_type {
             AgentType::Claude => convert_claude_provider(&id, &name, &settings),
@@ -72,7 +80,11 @@ pub fn import_from_ccswitch() -> Result<ImportResult, String> {
         match config.enroll_account(agent_type, account) {
             Ok(_) => {
                 if is_current {
-                    let _ = config.designate_active(agent_type, &id);
+                    log::warn!(
+                        "[import] ignored CC Switch current provider id={} agent={:?}; Flip current account follows live agent config.",
+                        id,
+                        agent_type
+                    );
                 }
                 imported += 1;
             }
@@ -83,24 +95,18 @@ pub fn import_from_ccswitch() -> Result<ImportResult, String> {
         }
     }
 
+    crate::current_account::reconcile_saved_current_accounts(&mut config);
     crate::profile::save_profiles(&config)?;
     Ok(ImportResult { imported, skipped })
 }
 
 /// ccswitch Claude provider → Flip Account
-fn convert_claude_provider(
-    id: &str,
-    name: &str,
-    settings: &serde_json::Value,
-) -> Account {
+fn convert_claude_provider(id: &str, name: &str, settings: &serde_json::Value) -> Account {
     let env = settings.get("env");
 
     // 从 env 中提取 API Key
     let api_key = env
-        .and_then(|e| {
-            e.get("ANTHROPIC_AUTH_TOKEN")
-                .or(e.get("ANTHROPIC_API_KEY"))
-        })
+        .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN").or(e.get("ANTHROPIC_API_KEY")))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
@@ -139,37 +145,116 @@ fn convert_claude_provider(
 }
 
 /// ccswitch Codex provider → Flip Account
-fn convert_codex_provider(
-    id: &str,
-    name: &str,
-    settings: &serde_json::Value,
-) -> Account {
-    let auth = settings.get("auth").cloned();
-    let config = settings
+fn convert_codex_provider(id: &str, name: &str, settings: &serde_json::Value) -> Account {
+    let raw_auth = settings.get("auth").cloned();
+    let raw_config = settings
         .get("config")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-
-    // 判断类型：有 OPENAI_API_KEY → API，否则 Plan
-    let has_api_key = auth
-        .as_ref()
-        .and_then(|a| a.get("OPENAI_API_KEY"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .is_some();
+    let account_type = crate::agent::codex::detect_account_type(&raw_auth);
+    let (auth, config) = match account_type {
+        AccountType::Plan => {
+            let auth = crate::agent::codex::collapse_empty_auth(
+                raw_auth
+                    .as_ref()
+                    .map(crate::agent::codex::extract_plan_auth),
+            );
+            (auth, None)
+        }
+        AccountType::Api => {
+            let auth = crate::agent::codex::collapse_empty_auth(
+                raw_auth.as_ref().map(crate::agent::codex::extract_api_auth),
+            );
+            let config = crate::agent::codex::collapse_empty_config(
+                raw_config
+                    .as_deref()
+                    .map(crate::agent::codex::extract_api_config),
+            );
+            (auth, config)
+        }
+    };
 
     Account {
         id: id.to_string(),
-        account_type: if has_api_key {
-            AccountType::Api
-        } else {
-            AccountType::Plan
-        },
+        account_type,
         label: name.to_string(),
         credentials: None,
         auth,
         config,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_codex_plan_provider_keeps_only_plan_fields() {
+        let account = convert_codex_provider(
+            "plan-1",
+            "Plan",
+            &serde_json::json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": {
+                        "account_id": "user-a",
+                        "access_token": "tok"
+                    },
+                    "last_refresh": "2026-04-20T00:00:00Z",
+                    "OPENAI_API_KEY": null
+                },
+                "config": "model = \"o3\"\n[projects.demo]\ntrusted = true\n"
+            }),
+        );
+
+        assert_eq!(account.account_type, AccountType::Plan);
+        assert_eq!(
+            account.auth,
+            Some(serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "account_id": "user-a",
+                    "access_token": "tok"
+                },
+                "last_refresh": "2026-04-20T00:00:00Z"
+            }))
+        );
+        assert_eq!(account.config, None);
+    }
+
+    #[test]
+    fn convert_codex_api_provider_keeps_only_required_fields() {
+        let account = convert_codex_provider(
+            "api-1",
+            "API",
+            &serde_json::json!({
+                "auth": {
+                    "OPENAI_API_KEY": "sk-test",
+                    "foo": "bar"
+                },
+                "config": "model = \"o3\"\nmodel_provider = \"azure\"\n[model_providers.azure]\nbase_url = \"https://example.com/v1\"\nwire_api = \"responses\"\n[projects.demo]\ntrusted = true\n"
+            }),
+        );
+
+        assert_eq!(account.account_type, AccountType::Api);
+        assert_eq!(
+            account.auth,
+            Some(serde_json::json!({
+                "OPENAI_API_KEY": "sk-test"
+            }))
+        );
+
+        let doc = account
+            .config
+            .as_deref()
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(doc.get("model_provider").unwrap().as_str(), Some("azure"));
+        assert!(doc.get("model_providers").is_some());
+        assert!(doc.get("model").is_none());
+        assert!(doc.get("projects").is_none());
     }
 }
 
@@ -183,18 +268,21 @@ pub fn enroll_api_account(
 ) -> Result<Account, String> {
     let account = match agent_type {
         AgentType::Claude => {
+            let provider_label = base_url
+                .as_deref()
+                .map(crate::agent::infer_provider_from_url)
+                .unwrap_or_else(|| label.clone());
+            let id = crate::agent::claude::generate_account_id(
+                &AccountType::Api,
+                &provider_label,
+                &api_key,
+            );
+
             let mut creds = serde_json::Map::new();
             creds.insert("apiKey".into(), api_key.into());
             if let Some(url) = &base_url {
                 creds.insert("baseUrl".into(), url.clone().into());
             }
-
-            let provider_label = base_url
-                .as_deref()
-                .map(crate::agent::infer_provider_from_url)
-                .unwrap_or_else(|| label.clone());
-            let id =
-                crate::agent::claude::generate_account_id(&AccountType::Api, &provider_label);
 
             Account {
                 id,
@@ -206,14 +294,13 @@ pub fn enroll_api_account(
             }
         }
         AgentType::Codex => {
+            let id = crate::agent::codex::generate_account_id(&AccountType::Api, &label, &api_key);
+
             let auth = serde_json::json!({ "OPENAI_API_KEY": api_key });
 
             // 有 base_url 时生成 config.toml 的 provider 段
             let config_str = base_url.as_deref().map(|url| {
-                let key = label
-                    .to_lowercase()
-                    .replace(' ', "_")
-                    .replace('-', "_");
+                let key = label.to_lowercase().replace(' ', "_").replace('-', "_");
                 format!(
                     "model_provider = \"{key}\"\n\n\
                      [model_providers.{key}]\n\
@@ -222,8 +309,6 @@ pub fn enroll_api_account(
                      requires_openai_auth = true\n"
                 )
             });
-
-            let id = crate::agent::codex::generate_account_id(&AccountType::Api, &label);
 
             Account {
                 id,

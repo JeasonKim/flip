@@ -23,9 +23,10 @@ export default function CaptureBar({
   const [baseUrl, setBaseUrl] = useState("");
   const [enrolling, setEnrolling] = useState(false);
 
-  // 每次弹窗获焦（用户点击托盘图标）时重新检测
+  // 每次弹窗获焦（用户点击托盘图标）时：先静默同步凭据，再检测新账号
   useEffect(() => {
-    const check = () => {
+    const check = async () => {
+      await api.syncCredentials(agent).catch(() => {});
       api.detectUnsaved(agent).then(setUnsaved).catch(() => {});
     };
     check();

@@ -7,16 +7,19 @@
     </linearGradient>
   </defs>
 
-  <!-- Background -->
-  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <!-- macOS icon safe area: 824x824 centered with 100px margin -->
+  <g transform="translate(100,100) scale(0.805)">
+    <!-- Background -->
+    <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
 
-  <!-- Top arrow → violet (Claude) -->
-  <path d="M280 390 H680 L600 310"
-        fill="none" stroke="#a78bfa" stroke-width="72"
-        stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Top arrow → violet (Claude) -->
+    <path d="M280 390 H680 L600 310"
+          fill="none" stroke="#a78bfa" stroke-width="72"
+          stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Bottom arrow ← emerald (Codex) -->
-  <path d="M744 634 H344 L424 714"
-        fill="none" stroke="#6ee7b7" stroke-width="72"
-        stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Bottom arrow ← emerald (Codex) -->
+    <path d="M744 634 H344 L424 714"
+          fill="none" stroke="#6ee7b7" stroke-width="72"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
 </svg>

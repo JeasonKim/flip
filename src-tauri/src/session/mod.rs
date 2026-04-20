@@ -34,11 +34,7 @@ pub struct SessionMessage {
 }
 
 /// 扫描会话列表，支持分页和 agent 筛选
-pub fn scan_sessions(
-    agent_filter: Option<&str>,
-    offset: usize,
-    limit: usize,
-) -> Vec<SessionMeta> {
+pub fn scan_sessions(agent_filter: Option<&str>, offset: usize, limit: usize) -> Vec<SessionMeta> {
     let mut all = Vec::new();
 
     let scan_claude = agent_filter.is_none() || agent_filter == Some("claude");

@@ -24,7 +24,12 @@ pub fn read_claude_credential() -> Result<Credential, String> {
 #[cfg(target_os = "macos")]
 fn read_claude_from_keychain() -> Result<Credential, String> {
     let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
         .map_err(|e| format!("failed to run security command: {e}"))?;
 

@@ -33,6 +33,10 @@ export async function dismissAccount(
   return invoke("dismiss_account", { agent, accountId });
 }
 
+export async function syncCredentials(agent: AgentId): Promise<void> {
+  return invoke("sync_credentials", { agent });
+}
+
 export async function detectUnsaved(agent: AgentId): Promise<boolean> {
   return invoke<boolean>("detect_unsaved", { agent });
 }

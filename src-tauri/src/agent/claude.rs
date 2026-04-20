@@ -61,7 +61,9 @@ pub fn infer_label(
     match account_type {
         AccountType::Plan => {
             if let Some(creds) = credentials {
-                let oauth = creds.get("claudeAiOauth").or_else(|| creds.get("claude.ai_oauth"));
+                let oauth = creds
+                    .get("claudeAiOauth")
+                    .or_else(|| creds.get("claude.ai_oauth"));
                 if let Some(sub_type) = oauth
                     .and_then(|o| o.get("subscriptionType"))
                     .and_then(|v| v.as_str())
@@ -108,17 +110,13 @@ pub async fn resolve_plan_identity(access_token: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// 生成唯一 ID
-pub fn generate_account_id(account_type: &AccountType, label: &str) -> String {
+/// 生成稳定的账号 ID（同一账号多次捕获 ID 不变）
+pub fn generate_account_id(account_type: &AccountType, label: &str, api_key: &str) -> String {
     match account_type {
         AccountType::Plan => label.to_lowercase().replace(' ', "-"),
         AccountType::Api => {
             let base = label.to_lowercase().replace(' ', "-");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            format!("{}-{:x}", base, ts % 0xFFFF)
+            format!("{}-{}", base, super::stable_id_suffix(api_key))
         }
     }
 }
@@ -212,7 +210,9 @@ fn read_json_optional(path: &PathBuf) -> Result<Option<serde_json::Value>, Strin
     if text.trim().is_empty() {
         return Ok(None);
     }
-    serde_json::from_str(&text).map(Some).map_err(|e| e.to_string())
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -23,6 +23,15 @@ pub fn infer_provider_from_url(url: &str) -> String {
     }
 }
 
+/// 确定性哈希，用于生成稳定的账号 ID 后缀
+pub fn stable_id_suffix(s: &str) -> String {
+    let mut h: u32 = 5381;
+    for b in s.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    format!("{:04x}", h & 0xFFFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

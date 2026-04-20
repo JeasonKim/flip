@@ -67,8 +67,7 @@ pub fn infer_label(
         AccountType::Api => {
             if let Some(text) = config_text {
                 if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
-                    if let Some(providers) = doc.get("model_providers").and_then(|v| v.as_table())
-                    {
+                    if let Some(providers) = doc.get("model_providers").and_then(|v| v.as_table()) {
                         for (_key, val) in providers.iter() {
                             if let Some(url) = val.get("base_url").and_then(|v| v.as_str()) {
                                 return super::infer_provider_from_url(url);
@@ -82,17 +81,13 @@ pub fn infer_label(
     }
 }
 
-/// 生成唯一 ID
-pub fn generate_account_id(account_type: &AccountType, label: &str) -> String {
+/// 生成稳定的账号 ID（同一账号多次捕获 ID 不变）
+pub fn generate_account_id(account_type: &AccountType, label: &str, api_key: &str) -> String {
     let base = label.to_lowercase().replace(' ', "-");
     match account_type {
         AccountType::Plan => base,
         AccountType::Api => {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            format!("{}-{:x}", base, ts % 0xFFFF)
+            format!("{}-{}", base, super::stable_id_suffix(api_key))
         }
     }
 }
@@ -115,14 +110,13 @@ pub fn extract_api_config(config_text: &str) -> String {
     new_doc.to_string()
 }
 
-/// Plan 账号：只保留 auth_mode + tokens（去掉 OPENAI_API_KEY:null、last_refresh 等噪音字段）
+/// Plan 账号：保留 auth_mode + tokens + last_refresh（去掉 OPENAI_API_KEY:null 等噪音字段）
 pub fn extract_plan_auth(auth: &serde_json::Value) -> serde_json::Value {
     let mut result = serde_json::Map::new();
-    if let Some(mode) = auth.get("auth_mode") {
-        result.insert("auth_mode".into(), mode.clone());
-    }
-    if let Some(tokens) = auth.get("tokens") {
-        result.insert("tokens".into(), tokens.clone());
+    for key in ["auth_mode", "tokens", "last_refresh"] {
+        if let Some(val) = auth.get(key) {
+            result.insert(key.into(), val.clone());
+        }
     }
     serde_json::Value::Object(result)
 }
@@ -130,10 +124,31 @@ pub fn extract_plan_auth(auth: &serde_json::Value) -> serde_json::Value {
 /// API 账号：只保留 OPENAI_API_KEY
 pub fn extract_api_auth(auth: &serde_json::Value) -> serde_json::Value {
     let mut result = serde_json::Map::new();
-    if let Some(key) = auth.get("OPENAI_API_KEY") {
-        result.insert("OPENAI_API_KEY".into(), key.clone());
+    if let Some(key) = auth
+        .get("OPENAI_API_KEY")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        result.insert("OPENAI_API_KEY".into(), key.into());
     }
     serde_json::Value::Object(result)
+}
+
+pub fn collapse_empty_auth(auth: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match auth {
+        Some(serde_json::Value::Object(fields)) if fields.is_empty() => None,
+        other => other,
+    }
+}
+
+pub fn collapse_empty_config(config: Option<String>) -> Option<String> {
+    config.and_then(|text| {
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    })
 }
 
 /// 将账号凭证写入 Codex 的 live 文件
@@ -288,10 +303,7 @@ mod tests {
             "auth_mode": "chatgpt",
             "tokens": { "access_token": "eyJ...", "account_id": "user-abc123" }
         }));
-        assert_eq!(
-            infer_label(&auth, &None, &AccountType::Plan),
-            "user-abc123"
-        );
+        assert_eq!(infer_label(&auth, &None, &AccountType::Plan), "user-abc123");
     }
 
     #[test]
@@ -360,6 +372,16 @@ sandbox_permissions = ["disk_full_read_access"]
         assert!(doc.get("model").is_none());
         assert!(doc.get("model_reasoning_effort").is_none());
         assert!(doc.get("projects").is_none());
+    }
+
+    #[test]
+    fn extract_api_auth_drops_null_openai_api_key() {
+        let auth = serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "foo": "bar"
+        });
+
+        assert_eq!(extract_api_auth(&auth), serde_json::json!({}));
     }
 
     #[test]

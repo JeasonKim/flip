@@ -9,7 +9,12 @@ use crate::session;
 
 #[tauri::command]
 pub async fn list_profiles() -> Result<serde_json::Value, String> {
-    let config = profile::load_profiles();
+    let mut config = profile::load_profiles();
+    if reconcile_current_accounts(&mut config) {
+        if let Err(err) = profile::save_profiles(&config) {
+            log::warn!("[current-account] failed to persist reconciled profiles: {err}");
+        }
+    }
     serde_json::to_value(&config).map_err(|e| e.to_string())
 }
 
@@ -67,7 +72,12 @@ async fn capture_claude_account() -> Result<Account, String> {
         }
     }
 
-    let id = crate::agent::claude::generate_account_id(&account_type, &label);
+    let api_key = settings
+        .as_ref()
+        .and_then(|s| s.get("apiKey"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let id = crate::agent::claude::generate_account_id(&account_type, &label, api_key);
 
     // 提取凭证：Plan → OAuth，API → apiKey + baseUrl
     let saved_credentials =
@@ -88,21 +98,32 @@ fn capture_codex_account() -> Result<Account, String> {
     let (auth, config_text) = crate::agent::codex::snapshot_live()?;
     let account_type = crate::agent::codex::detect_account_type(&auth);
     let label = crate::agent::codex::infer_label(&auth, &config_text, &account_type);
-    let id = crate::agent::codex::generate_account_id(&account_type, &label);
+    let api_key = auth
+        .as_ref()
+        .and_then(|v| v.get("OPENAI_API_KEY"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let id = crate::agent::codex::generate_account_id(&account_type, &label, api_key);
 
     // 按类型只提取必要的凭据字段
     let (trimmed_auth, trimmed_config) = match account_type {
         // Plan：auth 只保留 auth_mode + tokens，不保存 config（model/projects 等是用户偏好）
         profile::AccountType::Plan => {
-            let a = auth.as_ref().map(crate::agent::codex::extract_plan_auth);
+            let a = crate::agent::codex::collapse_empty_auth(
+                auth.as_ref().map(crate::agent::codex::extract_plan_auth),
+            );
             (a, None)
         }
         // API：auth 只保留 OPENAI_API_KEY，config 只保留 provider 段
         profile::AccountType::Api => {
-            let a = auth.as_ref().map(crate::agent::codex::extract_api_auth);
-            let c = config_text
-                .as_deref()
-                .map(crate::agent::codex::extract_api_config);
+            let a = crate::agent::codex::collapse_empty_auth(
+                auth.as_ref().map(crate::agent::codex::extract_api_auth),
+            );
+            let c = crate::agent::codex::collapse_empty_config(
+                config_text
+                    .as_deref()
+                    .map(crate::agent::codex::extract_api_config),
+            );
             (a, c)
         }
     };
@@ -122,8 +143,81 @@ pub async fn dismiss_account(agent: String, account_id: String) -> Result<(), St
     let agent_type: AgentType = agent.parse()?;
     let mut config = profile::load_profiles();
     config.dismiss_account(agent_type, &account_id)?;
+    reconcile_current_accounts(&mut config);
     profile::save_profiles(&config)?;
     Ok(())
+}
+
+/// 静默同步：将 live 凭据更新到已保存的 Plan 账号（token 自动刷新场景）
+#[tauri::command]
+pub async fn sync_credentials(agent: String) -> Result<(), String> {
+    let agent_type: AgentType = agent.parse()?;
+    let mut config = profile::load_profiles();
+
+    let updated = match agent_type {
+        AgentType::Claude => sync_claude_plan_credentials(&mut config),
+        AgentType::Codex => sync_codex_plan_credentials(&mut config),
+    };
+
+    if updated {
+        profile::save_profiles(&config)?;
+    }
+    Ok(())
+}
+
+/// Claude Plan：用 live 凭据覆盖已保存的 Plan 账号
+fn sync_claude_plan_credentials(config: &mut profile::FlipConfig) -> bool {
+    let Ok((_, credentials)) = crate::agent::claude::snapshot_live() else {
+        return false;
+    };
+    let Some(creds) = credentials else {
+        return false;
+    };
+    // 只同步 Plan 账号（有 OAuth token 的）
+    if creds.get("claudeAiOauth").is_none() && creds.get("claude.ai_oauth").is_none() {
+        return false;
+    }
+
+    let cfg = config.agent_config_mut(profile::AgentType::Claude);
+    let mut updated = false;
+    for account in cfg.accounts.iter_mut() {
+        if account.account_type == profile::AccountType::Plan
+            && account.credentials.as_ref() != Some(&creds)
+        {
+            account.credentials = Some(creds.clone());
+            updated = true;
+        }
+    }
+    updated
+}
+
+/// Codex Plan：用 live auth（auth_mode + tokens）覆盖已保存的 Plan 账号
+fn sync_codex_plan_credentials(config: &mut profile::FlipConfig) -> bool {
+    let Ok((auth, _)) = crate::agent::codex::snapshot_live() else {
+        return false;
+    };
+    let Some(auth_val) = auth else {
+        return false;
+    };
+    if crate::agent::codex::detect_account_type(&Some(auth_val.clone()))
+        != profile::AccountType::Plan
+    {
+        return false;
+    }
+
+    let trimmed = crate::agent::codex::extract_plan_auth(&auth_val);
+
+    let cfg = config.agent_config_mut(profile::AgentType::Codex);
+    let mut updated = false;
+    for account in cfg.accounts.iter_mut() {
+        if account.account_type == profile::AccountType::Plan
+            && account.auth.as_ref() != Some(&trimmed)
+        {
+            account.auth = Some(trimmed.clone());
+            updated = true;
+        }
+    }
+    updated
 }
 
 /// 检测当前 live 配置的身份是否尚未被捕获
@@ -159,9 +253,7 @@ fn detect_claude_unsaved(accounts: &[Account]) -> Result<bool, String> {
                 a.account_type == profile::AccountType::Plan
                     && a.credentials
                         .as_ref()
-                        .and_then(|c| {
-                            c.get("claudeAiOauth").or_else(|| c.get("claude.ai_oauth"))
-                        })
+                        .and_then(|c| c.get("claudeAiOauth").or_else(|| c.get("claude.ai_oauth")))
                         .and_then(|o| o.get("refreshToken"))
                         .and_then(|v| v.as_str())
                         == Some(live_rt)
@@ -279,17 +371,25 @@ fn read_claude_model_info() -> Result<serde_json::Value, String> {
         None
     };
 
+    // 没有配置模型时显示 "default"
     let model = settings
         .as_ref()
         .and_then(|s| s.get("model"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".into());
 
+    // 推理级别：优先 effortLevel，fallback 到 env.CLAUDE_CODE_EFFORT_LEVEL
     let thinking = settings
         .as_ref()
-        .and_then(|s| s.get("env"))
-        .and_then(|e| e.get("CLAUDE_CODE_EFFORT_LEVEL"))
-        .and_then(|v| v.as_str())
+        .and_then(|s| s.get("effortLevel").and_then(|v| v.as_str()))
+        .or_else(|| {
+            settings
+                .as_ref()
+                .and_then(|s| s.get("env"))
+                .and_then(|e| e.get("CLAUDE_CODE_EFFORT_LEVEL"))
+                .and_then(|v| v.as_str())
+        })
         .map(|s| s.to_string());
 
     Ok(serde_json::json!({ "model": model, "thinking": thinking }))
@@ -308,7 +408,8 @@ fn read_codex_model_info() -> Result<serde_json::Value, String> {
         .as_ref()
         .and_then(|d| d.get("model"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".into());
 
     let thinking = doc
         .as_ref()
@@ -414,6 +515,10 @@ pub async fn import_from_ccswitch() -> Result<serde_json::Value, String> {
     serde_json::to_value(&result).map_err(|e| e.to_string())
 }
 
+fn reconcile_current_accounts(config: &mut profile::FlipConfig) -> bool {
+    crate::current_account::reconcile_saved_current_accounts(config)
+}
+
 /// 手动添加 API 账号
 #[tauri::command]
 pub async fn enroll_api_account(
@@ -424,13 +529,8 @@ pub async fn enroll_api_account(
 ) -> Result<serde_json::Value, String> {
     let agent_type: profile::AgentType = agent.parse()?;
     let mut config = profile::load_profiles();
-    let account = crate::import::enroll_api_account(
-        &mut config,
-        agent_type,
-        label,
-        api_key,
-        base_url,
-    )?;
+    let account =
+        crate::import::enroll_api_account(&mut config, agent_type, label, api_key, base_url)?;
     serde_json::to_value(&account).map_err(|e| e.to_string())
 }
 
