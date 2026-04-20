@@ -1,43 +1,43 @@
 # Flip
 
-[中文说明](README.zh-CN.md)
+[English](README.en.md)
 
-Flip is a lightweight tray utility for switching and managing local accounts used by `Claude Code` and `Codex`.
+Flip 是一个轻量的托盘工具，用来切换和管理本机 `Claude Code` 与 `Codex` 的账号。
 
-## Overview
+## 简介
 
-Flip keeps account switching close to where you work:
+Flip 把常用的账号切换能力收敛到一个面板里：
 
-- Manage `Claude Code` and `Codex` accounts from a single popup panel
-- Capture the current live account into saved profiles
-- Add API accounts manually
-- Import existing accounts from `CC Switch`
-- Show plan quota usage for the currently active account
-- Browse session history and reopen related resources
-- Keep the displayed “current account” aligned with the actual live configuration
+- 在同一个弹窗里管理 `Claude Code` 和 `Codex`
+- 捕获当前 live 配置并保存为账号
+- 手动添加 API 账号
+- 从 `CC Switch` 导入已有账号
+- 展示当前激活 `Plan` 账号的额度使用情况
+- 查看会话记录并恢复会话
+- 让“当前使用中的账号”跟实际 live 配置保持一致
 
-## Screenshots
+## 效果图
 
-### Account popup
+### 账号弹窗
 
-![Flip account popup](docs/preview.png)
+![Flip 账号弹窗](docs/preview.png)
 
-### Session history
+### 会话记录
 
-![Flip session history](docs/session.png)
+![Flip 会话记录](docs/session.png)
 
-The session view helps you review historical `Claude Code` and `Codex` conversations, filter by agent, inspect message details, clean old records, and resume a session from its original context.
+会话窗口可以查看历史 `Claude Code` 和 `Codex` 对话，按 agent 过滤，查看消息详情，清理旧记录，并从原始上下文恢复会话。
 
-## Workflow
+## 工作流
 
 ```mermaid
 flowchart TD
-    Tray[Tray / Menu Bar]
-    Popup[Flip Popup Panel]
+    Tray[托盘 / 菜单栏]
+    Popup[Flip 弹窗面板]
     Claude[Claude Code]
     Codex[Codex]
-    Capture[Capture current account<br/>or add API account]
-    Profiles[Saved profiles<br/>~/.flip/profiles.yaml]
+    Capture[捕获当前账号<br/>或手动添加 API]
+    Profiles[保存的账号配置<br/>~/.flip/profiles.yaml]
 
     Tray --> Popup
     Popup --> Claude
@@ -47,81 +47,81 @@ flowchart TD
     Profiles --> Popup
 ```
 
-## Tech Stack
+## 技术栈
 
-- Frontend: `React 19` + `TypeScript` + `Vite`
-- Desktop shell: `Tauri 2`
-- Backend: `Rust`
-- Styling and motion: `Tailwind CSS 4` + `Framer Motion`
+- 前端：`React 19` + `TypeScript` + `Vite`
+- 桌面容器：`Tauri 2`
+- 后端：`Rust`
+- 样式与动效：`Tailwind CSS 4` + `Framer Motion`
 
-## Features
+## 功能
 
-### Account management
+### 账号管理
 
-- Switch between saved `plan` and `api` accounts
-- Capture the current live identity from local agent config
-- Add API credentials manually
-- Remove stale accounts from the saved list
-- Rename saved accounts in the popup
+- 在已保存的 `plan` / `api` 账号之间切换
+- 从本地 agent live 配置里捕获当前身份
+- 手动录入 API 凭证
+- 删除无效或不再需要的账号
+- 在弹窗里重命名已保存账号
 
-### Integrations
+### 集成能力
 
-- Import providers from `~/.cc-switch/cc-switch.db`
-- Open the local Flip config file directly
-- Read live model / reasoning info for each agent
-- Reconcile saved “current” status with real live config
+- 从 `~/.cc-switch/cc-switch.db` 导入 provider
+- 直接打开 Flip 本地配置文件
+- 读取每个 agent 当前的模型和推理强度
+- 用真实 live 配置回填“当前账号”展示状态
 
-### Sessions and quota
+### 会话与额度
 
-- Display plan quota usage in the popup
-- Open the sessions window
-- Scan saved session records and resume sessions
+- 在弹窗里展示 `Plan` 额度
+- 打开会话窗口
+- 扫描历史会话并恢复会话
 
-## Development
+## 开发
 
-### Requirements
+### 环境要求
 
 - `Node.js 22+`
 - `pnpm`
 - `Rust stable`
-- Tauri system dependencies for your platform
+- 对应平台的 Tauri 系统依赖
 
-### Install
+### 安装依赖
 
 ```bash
 pnpm install
 ```
 
-### Run in development
+### 本地开发
 
 ```bash
 pnpm tauri dev
 ```
 
-### Build
+### 正式打包
 
 ```bash
 pnpm tauri build
 ```
 
-### Faster local packaging
+### 更快的本地打包
 
 ```bash
 pnpm tauri build -- --profile dev-release
 ```
 
-## Project Structure
+## 目录结构
 
 ```text
-src/                 React popup and session UI
-src-tauri/src/       Tauri / Rust backend
-src-tauri/icons/     App icons
-src-tauri/patches/   Local dependency patches
-docs/                README assets
+src/                 React 弹窗与会话界面
+src-tauri/src/       Tauri / Rust 后端
+src-tauri/icons/     应用图标
+src-tauri/patches/   本地依赖补丁
+docs/                README 素材
 ```
 
-## Notes
+## 说明
 
-- Flip stores saved profiles in `~/.flip/profiles.yaml`
-- The app focuses on local account switching rather than cloud-side account management
-- Current releases are packaged for `macOS` and `Windows`
+- Flip 的本地配置保存在 `~/.flip/profiles.yaml`
+- 这个项目关注的是本地账号切换体验，不负责云端账号管理
+- 当前发布产物面向 `macOS` 和 `Windows`
