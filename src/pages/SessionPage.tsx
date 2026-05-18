@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import type { AgentId, SessionMeta } from "../types/profile";
+import type { SessionAgentId, SessionMeta } from "../types/profile";
 import { useSessions } from "../hooks/useSessions";
 import { purgeSessions } from "../lib/invoke";
 import SessionList from "../components/session/SessionList";
@@ -47,15 +47,23 @@ function SessionPage() {
       <div className="shrink-0 border-b border-white/10 px-4 py-3 flex items-center gap-3">
         {/* Agent 切换 */}
         <div className="flex items-center gap-1 bg-white/5 rounded-lg p-0.5">
-          {(["all", "claude", "codex"] as const).map((val) => {
+          {(["all", "claude", "codex", "opencode"] as const).map((val) => {
             const isActive =
               val === "all" ? !agentFilter : agentFilter === val;
+            const label =
+              val === "all"
+                ? "All"
+                : val === "claude"
+                  ? "Claude"
+                  : val === "codex"
+                    ? "Codex"
+                    : "OpenCode";
             return (
               <button
                 key={val}
                 onClick={() =>
                   setAgentFilter(
-                    val === "all" ? undefined : (val as AgentId),
+                    val === "all" ? undefined : (val as SessionAgentId),
                   )
                 }
                 className={`px-3 py-1 text-xs rounded-md transition-colors ${
@@ -64,11 +72,7 @@ function SessionPage() {
                     : "text-gray-400 hover:text-gray-200"
                 }`}
               >
-                {val === "all"
-                  ? "All"
-                  : val === "claude"
-                    ? "Claude"
-                    : "Codex"}
+                {label}
               </button>
             );
           })}
@@ -122,7 +126,9 @@ function SessionPage() {
           ) : (
             <SessionList
               sessions={sessions}
-              selectedId={selected?.session_id ?? null}
+              selectedKey={
+                selected ? `${selected.agent}-${selected.session_id}` : null
+              }
               hasMore={hasMore}
               onSelect={setSelected}
               onLoadMore={loadMore}

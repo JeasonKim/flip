@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentId, SessionMeta, SessionMessage } from "../types/profile";
+import type { SessionAgentId, SessionMeta, SessionMessage } from "../types/profile";
 import * as api from "../lib/invoke";
 
 const PAGE_SIZE = 20;
@@ -11,7 +11,7 @@ export function useSessions() {
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
 
-  const [agentFilter, setAgentFilter] = useState<AgentId | undefined>();
+  const [agentFilter, setAgentFilter] = useState<SessionAgentId | undefined>();
 
   // 当前已加载的总条数，用于静默刷新时保持范围一致
   const loadedCountRef = useRef(PAGE_SIZE);
@@ -51,8 +51,14 @@ export function useSessions() {
         const data = await api.scanSessions(agentFilter, 0, count);
         setSessions(data);
         setHasMore(data.length >= count);
-      } catch {
-        // 静默刷新失败不中断
+      } catch (error) {
+        console.warn(
+          `[sessions] refresh failed agent=${agentFilter ?? "all"} count=${Math.max(
+            loadedCountRef.current,
+            PAGE_SIZE,
+          )}`,
+          error,
+        );
       }
     }, REFRESH_INTERVAL);
     return () => clearInterval(timer);
@@ -89,8 +95,11 @@ export function useSessionMessages(agent: string, sourcePath: string) {
       try {
         const data = await api.loadSessionMessages(agent, sourcePath);
         setMessages(data);
-      } catch {
-        // 静默失败
+      } catch (error) {
+        console.warn(
+          `[sessions] message refresh failed agent=${agent} source=${sourcePath}`,
+          error,
+        );
       }
     }, MESSAGE_REFRESH_INTERVAL);
     return () => clearInterval(timer);

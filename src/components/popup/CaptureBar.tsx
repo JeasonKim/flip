@@ -6,7 +6,7 @@ import * as api from "../../lib/invoke";
 interface CaptureBarProps {
   agent: AgentId;
   onCapture: (agent: AgentId) => Promise<void>;
-  onEnrolled?: () => void;
+  onEnrolled?: () => Promise<void> | void;
 }
 
 export default function CaptureBar({
@@ -26,13 +26,24 @@ export default function CaptureBar({
   // 每次弹窗获焦（用户点击托盘图标）时：先静默同步凭据，再检测新账号
   useEffect(() => {
     const check = async () => {
-      await api.syncCredentials(agent).catch(() => {});
-      api.detectUnsaved(agent).then(setUnsaved).catch(() => {});
+      await api.syncCredentials(agent).catch((error) => {
+        console.warn(`[capture] sync credentials failed agent=${agent}`, error);
+      });
+      try {
+        let hasUnsaved = await api.detectUnsaved(agent);
+        if (hasUnsaved && onEnrolled) {
+          await onEnrolled();
+          hasUnsaved = await api.detectUnsaved(agent);
+        }
+        setUnsaved(hasUnsaved);
+      } catch (error) {
+        console.warn(`[capture] detect unsaved failed agent=${agent}`, error);
+      }
     };
     check();
     window.addEventListener("focus", check);
     return () => window.removeEventListener("focus", check);
-  }, [agent]);
+  }, [agent, onEnrolled]);
 
   const handleCapture = useCallback(async () => {
     setCapturing(true);

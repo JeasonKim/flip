@@ -10,16 +10,18 @@ mod session;
 mod tray_panel;
 
 use crate::tray_panel::{
-    calculate_macos_popup_origin, resolve_tray_panel_visibility_change, PopupFrameSize,
-    TrayAnchorFrame, TrayPanelVisibilityChange, WorkAreaFrame,
+    calculate_macos_popup_origin, resolve_tray_panel_visibility_change,
+    should_hide_tray_panel_after_focus_change, PopupFrameSize, TrayAnchorFrame,
+    TrayPanelVisibilityChange, WorkAreaFrame,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 托盘图标的选中态：仅由左键点击切换，用它决定面板是否应该显示。
 static TRAY_ICON_SELECTED: AtomicBool = AtomicBool::new(false);
+const TRAY_ICON_ID: &str = "main-tray";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -48,6 +50,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             setup_macos_panel(&popup);
 
+            register_popup_focus_behavior(app.handle(), &popup);
+
             // 托盘右键菜单
             let menu = Menu::with_items(
                 app,
@@ -63,7 +67,7 @@ pub fn run() {
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
                 .expect("failed to load tray icon");
 
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id(TRAY_ICON_ID)
                 .icon(icon)
                 .icon_as_template(true)
                 .menu(&menu)
@@ -133,6 +137,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
+            commands::reconcile_live_profiles,
             commands::flip_account,
             commands::capture_current,
             commands::dismiss_account,
@@ -167,6 +172,11 @@ fn show_popup(
     // macOS：菜单栏在顶部，弹窗向下展开
     #[cfg(target_os = "macos")]
     {
+        // 面板显示期间，禁用失焦自动隐藏，这样菜单栏会保持显示
+        if let Err(err) = set_hides_on_deactivate(popup, false) {
+            log::warn!("[tray-panel] failed to disable hidesOnDeactivate: {err}");
+        }
+
         let popup_size = match popup.outer_size() {
             Ok(size) => PopupFrameSize::from(size),
             Err(err) => {
@@ -212,6 +222,9 @@ fn show_popup(
         log::warn!("[tray-panel] failed to show popup after selecting tray icon: {err}");
         return false;
     }
+    if let Err(err) = popup.emit("flip-popup-shown", ()) {
+        log::warn!("[tray-panel] failed to emit popup shown event: {err}");
+    }
 
     // Windows：保持“任务栏图标被选中 → 面板显示”的简单切换语义，不主动抢焦点。
     #[cfg(target_os = "macos")]
@@ -225,6 +238,12 @@ fn show_popup(
 }
 
 fn hide_popup(popup: &tauri::WebviewWindow) -> bool {
+    // 恢复失焦自动隐藏（下次显示面板前会再次禁用）
+    #[cfg(target_os = "macos")]
+    if let Err(err) = set_hides_on_deactivate(popup, true) {
+        log::warn!("[tray-panel] failed to re-enable hidesOnDeactivate: {err}");
+    }
+
     if let Err(err) = popup.hide() {
         log::warn!("[tray-panel] failed to hide popup after unselecting tray icon: {err}");
         return false;
@@ -268,6 +287,35 @@ fn sync_tray_icon_selection<R: tauri::Runtime>(tray: &tauri::tray::TrayIcon<R>, 
     let _ = (tray, is_selected);
 }
 
+fn register_popup_focus_behavior(app: &tauri::AppHandle, popup: &tauri::WebviewWindow) {
+    let app_handle = app.clone();
+    let popup_window = popup.clone();
+
+    popup.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(is_popup_focused) = event {
+            if !should_hide_tray_panel_after_focus_change(
+                TRAY_ICON_SELECTED.load(Ordering::SeqCst),
+                *is_popup_focused,
+            ) {
+                return;
+            }
+
+            TRAY_ICON_SELECTED.store(false, Ordering::SeqCst);
+
+            if !hide_popup(&popup_window) {
+                return;
+            }
+
+            let Some(tray) = app_handle.tray_by_id(TRAY_ICON_ID) else {
+                log::warn!("[tray-panel] tray icon missing when resetting popup focus state");
+                return;
+            };
+
+            sync_tray_icon_selection(&tray, false);
+        }
+    });
+}
+
 /// macOS：配置窗口层级和集合行为，让面板在全屏空间中正常显示
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
@@ -286,10 +334,9 @@ fn setup_macos_panel(window: &tauri::WebviewWindow) {
         // 窗口层级：101（popUpMenu），高于全屏 app 和菜单栏
         ns_window.setLevel_(101);
 
-        // Accessory 模式下 app 会被系统 deactivate → 窗口自动隐藏
-        // 关闭此行为，让面板在 app 失去焦点时仍然可见
-        let no: cocoa::base::BOOL = cocoa::base::NO;
-        let _: () = objc::msg_send![ns_window, setHidesOnDeactivate: no];
+        // 面板失去焦点后应跟随系统菜单栏产品的默认行为自动收起
+        let yes: cocoa::base::BOOL = cocoa::base::YES;
+        let _: () = objc::msg_send![ns_window, setHidesOnDeactivate: yes];
 
         // 集合行为：
         // - canJoinAllSpaces(1<<0): 所有桌面空间可见
@@ -301,4 +348,26 @@ fn setup_macos_panel(window: &tauri::WebviewWindow) {
         );
         ns_window.setCollectionBehavior_(behavior);
     }
+}
+
+/// macOS：设置窗口失焦后是否自动隐藏（面板显示期间禁用，让菜单栏保持可见）
+#[cfg(target_os = "macos")]
+fn set_hides_on_deactivate(window: &tauri::WebviewWindow, hide: bool) -> Result<(), String> {
+    use objc::sel;
+    use objc::sel_impl;
+
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("failed to get ns_window: {e}"))?
+        as cocoa::base::id;
+
+    unsafe {
+        let flag: cocoa::base::BOOL = if hide {
+            cocoa::base::YES
+        } else {
+            cocoa::base::NO
+        };
+        let _: () = objc::msg_send![ns_window, setHidesOnDeactivate: flag];
+    }
+    Ok(())
 }

@@ -9,8 +9,18 @@ use crate::session;
 
 #[tauri::command]
 pub async fn list_profiles() -> Result<serde_json::Value, String> {
+    let config = profile::load_profiles();
+    serde_json::to_value(&config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reconcile_live_profiles() -> Result<serde_json::Value, String> {
     let mut config = profile::load_profiles();
+    let mut updated = enroll_detected_live_accounts(&mut config).await;
     if reconcile_current_accounts(&mut config) {
+        updated = true;
+    }
+    if updated {
         if let Err(err) = profile::save_profiles(&config) {
             log::warn!("[current-account] failed to persist reconciled profiles: {err}");
         }
@@ -72,9 +82,17 @@ async fn capture_claude_account() -> Result<Account, String> {
         }
     }
 
+    // 顶层 apiKey 或 env.ANTHROPIC_AUTH_TOKEN 均可作为账号 ID 的稳定标识
     let api_key = settings
         .as_ref()
-        .and_then(|s| s.get("apiKey"))
+        .and_then(|s| {
+            s.get("apiKey").or_else(|| {
+                s.get("env").and_then(|e| {
+                    e.get("ANTHROPIC_AUTH_TOKEN")
+                        .or_else(|| e.get("ANTHROPIC_API_KEY"))
+                })
+            })
+        })
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let id = crate::agent::claude::generate_account_id(&account_type, &label, api_key);
@@ -136,6 +154,78 @@ fn capture_codex_account() -> Result<Account, String> {
         auth: trimmed_auth,
         config: trimmed_config,
     })
+}
+
+async fn enroll_detected_live_accounts(config: &mut profile::FlipConfig) -> bool {
+    let mut updated = false;
+    updated |= enroll_detected_live_account(config, AgentType::Claude).await;
+    updated |= enroll_detected_live_account(config, AgentType::Codex).await;
+    updated
+}
+
+async fn enroll_detected_live_account(
+    config: &mut profile::FlipConfig,
+    agent_type: AgentType,
+) -> bool {
+    let unsaved = {
+        let accounts = &config.agent_config(agent_type).accounts;
+        match agent_type {
+            AgentType::Claude => detect_claude_unsaved(accounts),
+            AgentType::Codex => detect_codex_unsaved(accounts),
+        }
+    };
+
+    let Ok(true) = unsaved else {
+        if let Err(err) = unsaved {
+            log::warn!(
+                "[current-account] failed to detect live account agent={}: {err}",
+                agent_name(agent_type)
+            );
+        }
+        return false;
+    };
+
+    let account = match agent_type {
+        AgentType::Claude => match capture_claude_account().await {
+            Ok(account) => account,
+            Err(err) => {
+                log::warn!("[current-account] failed to auto-enroll Claude live account: {err}");
+                return false;
+            }
+        },
+        AgentType::Codex => match capture_codex_account() {
+            Ok(account) => account,
+            Err(err) => {
+                log::warn!("[current-account] failed to auto-enroll Codex live account: {err}");
+                return false;
+            }
+        },
+    };
+
+    let account_id = account.id.clone();
+    let account_type = account.account_type.clone();
+    let label = account.label.clone();
+
+    match config.enroll_account_as_current(agent_type, account) {
+        Ok(()) => {
+            log::warn!(
+                "[current-account] auto-enrolled live account agent={} account_id={} type={} label={}",
+                agent_name(agent_type),
+                account_id,
+                account_type_name(&account_type),
+                label,
+            );
+            true
+        }
+        Err(err) => {
+            log::warn!(
+                "[current-account] failed to persist auto-enrolled live account agent={} account_id={}: {err}",
+                agent_name(agent_type),
+                account_id
+            );
+            false
+        }
+    }
 }
 
 #[tauri::command]
@@ -261,20 +351,39 @@ fn detect_claude_unsaved(accounts: &[Account]) -> Result<bool, String> {
             Ok(!found)
         }
         profile::AccountType::Api => {
+            // 顶层 apiKey 或 env.ANTHROPIC_AUTH_TOKEN 均作为身份比对依据
             let live_key = settings
                 .as_ref()
-                .and_then(|s| s.get("apiKey"))
+                .and_then(|s| {
+                    s.get("apiKey").or_else(|| {
+                        s.get("env").and_then(|e| {
+                            e.get("ANTHROPIC_AUTH_TOKEN")
+                                .or_else(|| e.get("ANTHROPIC_API_KEY"))
+                        })
+                    })
+                })
                 .and_then(|v| v.as_str());
             let Some(live_key) = live_key else {
                 return Ok(true);
             };
             let found = accounts.iter().any(|a| {
-                a.account_type == profile::AccountType::Api
-                    && a.credentials
-                        .as_ref()
-                        .and_then(|c| c.get("apiKey"))
-                        .and_then(|v| v.as_str())
-                        == Some(live_key)
+                if a.account_type != profile::AccountType::Api {
+                    return false;
+                }
+                let Some(creds) = a.credentials.as_ref() else {
+                    return false;
+                };
+                if creds.get("apiKey").and_then(|v| v.as_str()) == Some(live_key) {
+                    return true;
+                }
+                creds
+                    .get("env")
+                    .and_then(|e| {
+                        e.get("ANTHROPIC_AUTH_TOKEN")
+                            .or_else(|| e.get("ANTHROPIC_API_KEY"))
+                    })
+                    .and_then(|v| v.as_str())
+                    == Some(live_key)
             });
             Ok(!found)
         }
@@ -517,6 +626,20 @@ pub async fn import_from_ccswitch() -> Result<serde_json::Value, String> {
 
 fn reconcile_current_accounts(config: &mut profile::FlipConfig) -> bool {
     crate::current_account::reconcile_saved_current_accounts(config)
+}
+
+fn agent_name(agent_type: AgentType) -> &'static str {
+    match agent_type {
+        AgentType::Claude => "claude",
+        AgentType::Codex => "codex",
+    }
+}
+
+fn account_type_name(account_type: &profile::AccountType) -> &'static str {
+    match account_type {
+        profile::AccountType::Plan => "plan",
+        profile::AccountType::Api => "api",
+    }
 }
 
 /// 手动添加 API 账号

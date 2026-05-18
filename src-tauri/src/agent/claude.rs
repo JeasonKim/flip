@@ -34,22 +34,39 @@ pub fn snapshot_live() -> Result<(Option<serde_json::Value>, Option<serde_json::
     Ok((settings, credentials))
 }
 
-/// 判断账号类型：有 OAuth 凭据 → Plan，有 apiKey → API
+/// 判断账号类型：API Key 优先；没有 API Key 时，有 OAuth 凭据 → Plan。
 pub fn detect_account_type(
     settings: &Option<serde_json::Value>,
     credentials: &Option<serde_json::Value>,
 ) -> AccountType {
+    if has_live_api_key(settings.as_ref()) {
+        return AccountType::Api;
+    }
     if let Some(creds) = credentials {
         if creds.get("claudeAiOauth").is_some() || creds.get("claude.ai_oauth").is_some() {
             return AccountType::Plan;
         }
     }
-    if let Some(s) = settings {
-        if s.get("apiKey").is_some() {
-            return AccountType::Api;
-        }
-    }
     AccountType::Plan
+}
+
+fn has_live_api_key(settings: Option<&serde_json::Value>) -> bool {
+    settings
+        .and_then(|s| {
+            s.get("apiKey")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    s.get("env")
+                        .and_then(|env| {
+                            env.get("ANTHROPIC_AUTH_TOKEN")
+                                .or_else(|| env.get("ANTHROPIC_API_KEY"))
+                        })
+                        .and_then(|value| value.as_str())
+                        .filter(|value| !value.is_empty())
+                })
+        })
+        .is_some()
 }
 
 /// 推断账号 label（同步 fallback，优先用 resolve_plan_identity 的结果覆盖）
@@ -75,7 +92,16 @@ pub fn infer_label(
         }
         AccountType::Api => {
             if let Some(s) = settings {
+                // 顶层 baseUrl 格式
                 if let Some(url) = s.get("baseUrl").and_then(|v| v.as_str()) {
+                    return super::infer_provider_from_url(url);
+                }
+                // env 格式（智谱等第三方 API）
+                if let Some(url) = s
+                    .get("env")
+                    .and_then(|e| e.get("ANTHROPIC_BASE_URL"))
+                    .and_then(|v| v.as_str())
+                {
                     return super::infer_provider_from_url(url);
                 }
             }
@@ -152,10 +178,24 @@ pub fn apply_profile(account: &Account) -> Result<(), String> {
 
             if let Some(obj) = settings.as_object_mut() {
                 if let Some(api_key) = creds.get("apiKey") {
+                    // 顶层 apiKey 格式：写入 apiKey + baseUrl，清除 env 中的 ANTHROPIC_* 避免冲突
                     obj.insert("apiKey".into(), api_key.clone());
-                }
-                if let Some(base_url) = creds.get("baseUrl") {
-                    obj.insert("baseUrl".into(), base_url.clone());
+                    match creds.get("baseUrl") {
+                        Some(url) => {
+                            obj.insert("baseUrl".into(), url.clone());
+                        }
+                        None => {
+                            obj.remove("baseUrl");
+                        }
+                    }
+                    if let Some(env_obj) = obj.get_mut("env").and_then(|e| e.as_object_mut()) {
+                        env_obj.retain(|k, _| !k.starts_with("ANTHROPIC_"));
+                    }
+                } else if let Some(env) = creds.get("env") {
+                    // env 格式（智谱等第三方 API）：写入 env 块，清除顶层 apiKey/baseUrl 避免冲突
+                    obj.insert("env".into(), env.clone());
+                    obj.remove("apiKey");
+                    obj.remove("baseUrl");
                 }
             }
 
@@ -178,18 +218,35 @@ pub fn extract_credentials(
         AccountType::Plan => credentials.clone(),
         AccountType::Api => {
             let s = settings.as_ref()?;
-            let mut obj = serde_json::Map::new();
-            if let Some(key) = s.get("apiKey") {
-                obj.insert("apiKey".into(), key.clone());
+
+            // 顶层 apiKey 格式
+            if s.get("apiKey").is_some() {
+                let mut obj = serde_json::Map::new();
+                if let Some(key) = s.get("apiKey") {
+                    obj.insert("apiKey".into(), key.clone());
+                }
+                if let Some(url) = s.get("baseUrl") {
+                    obj.insert("baseUrl".into(), url.clone());
+                }
+                return if obj.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(obj))
+                };
             }
-            if let Some(url) = s.get("baseUrl") {
-                obj.insert("baseUrl".into(), url.clone());
+
+            // env 格式（智谱等第三方 API）：保存完整 env 块，包含 model 配置
+            if let Some(env) = s.get("env") {
+                if env
+                    .get("ANTHROPIC_AUTH_TOKEN")
+                    .or_else(|| env.get("ANTHROPIC_API_KEY"))
+                    .is_some()
+                {
+                    return Some(serde_json::json!({ "env": env }));
+                }
             }
-            if obj.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Object(obj))
-            }
+
+            None
         }
     }
 }
@@ -271,8 +328,72 @@ mod tests {
             extracted.get("baseUrl").unwrap(),
             "https://openrouter.ai/api/v1"
         );
-        // 不应包含其他设置字段
         assert!(extracted.get("model").is_none());
+        assert!(extracted.get("hasCompletedOnboarding").is_none());
+    }
+
+    #[test]
+    fn detect_api_with_env_auth_token() {
+        let settings = Some(serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "zhipu-key"
+            }
+        }));
+        assert_eq!(detect_account_type(&settings, &None), AccountType::Api);
+    }
+
+    #[test]
+    fn detect_api_settings_take_priority_over_leftover_oauth_credentials() {
+        let settings = Some(serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com",
+                "ANTHROPIC_AUTH_TOKEN": "api-key"
+            }
+        }));
+        let credentials = Some(serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "oauth-token",
+                "refreshToken": "refresh-token"
+            }
+        }));
+
+        assert_eq!(
+            detect_account_type(&settings, &credentials),
+            AccountType::Api
+        );
+    }
+
+    #[test]
+    fn infer_label_api_from_env_base_url() {
+        let settings = Some(serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "zhipu-key"
+            }
+        }));
+        assert_eq!(infer_label(&settings, &None, &AccountType::Api), "Zhipu AI");
+    }
+
+    #[test]
+    fn extract_credentials_api_env_format_stores_full_env_block() {
+        let settings = Some(serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "zhipu-key",
+                "ANTHROPIC_MODEL": "glm-5.1"
+            },
+            "hasCompletedOnboarding": true
+        }));
+        let extracted = extract_credentials(&settings, &None, &AccountType::Api).unwrap();
+        let env = extracted.get("env").unwrap();
+        assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "zhipu-key");
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").unwrap(),
+            "https://open.bigmodel.cn/api/anthropic"
+        );
+        assert_eq!(env.get("ANTHROPIC_MODEL").unwrap(), "glm-5.1");
+        // 不应包含 env 以外的字段
         assert!(extracted.get("hasCompletedOnboarding").is_none());
     }
 }

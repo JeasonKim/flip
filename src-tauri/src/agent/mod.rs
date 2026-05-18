@@ -14,6 +14,8 @@ pub fn infer_provider_from_url(url: &str) -> String {
         "Azure OpenAI".into()
     } else if url_lower.contains("api.openai.com") {
         "OpenAI".into()
+    } else if url_lower.contains("bigmodel.cn") {
+        "Zhipu AI".into()
     } else {
         // 截取域名
         url::Url::parse(url)
@@ -65,6 +67,10 @@ mod tests {
         assert_eq!(
             infer_provider_from_url("https://my-proxy.example.com/v1"),
             "my-proxy.example.com"
+        );
+        assert_eq!(
+            infer_provider_from_url("https://open.bigmodel.cn/api/anthropic"),
+            "Zhipu AI"
         );
     }
 }

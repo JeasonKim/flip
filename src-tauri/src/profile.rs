@@ -137,6 +137,17 @@ impl FlipConfig {
         Ok(())
     }
 
+    /// 收录当前 live 账号，并将它标记为当前激活账号。
+    pub fn enroll_account_as_current(
+        &mut self,
+        agent: AgentType,
+        account: Account,
+    ) -> Result<(), String> {
+        let account_id = account.id.clone();
+        self.enroll_account(agent, account)?;
+        self.designate_active(agent, &account_id)
+    }
+
     /// 删除账号
     pub fn dismiss_account(&mut self, agent: AgentType, account_id: &str) -> Result<(), String> {
         let cfg = self.agent_config_mut(agent);
@@ -223,6 +234,37 @@ mod tests {
         cfg.enroll_account(AgentType::Claude, updated).unwrap();
         assert_eq!(cfg.claude.accounts.len(), 1);
         assert_eq!(cfg.claude.accounts[0].label, "Updated Label");
+    }
+
+    #[test]
+    fn enroll_detected_live_account_marks_it_current_even_when_accounts_exist() {
+        let mut cfg = FlipConfig::default();
+        cfg.enroll_account(AgentType::Claude, sample_account("plan", AccountType::Plan))
+            .unwrap();
+
+        cfg.enroll_account_as_current(AgentType::Claude, sample_account("api", AccountType::Api))
+            .unwrap();
+
+        assert_eq!(cfg.claude.current.as_deref(), Some("api"));
+        assert_eq!(cfg.claude.accounts.len(), 2);
+    }
+
+    #[test]
+    fn enroll_detected_existing_live_account_updates_and_marks_current() {
+        let mut cfg = FlipConfig::default();
+        cfg.enroll_account(AgentType::Claude, sample_account("plan", AccountType::Plan))
+            .unwrap();
+        cfg.enroll_account(AgentType::Claude, sample_account("api", AccountType::Api))
+            .unwrap();
+
+        let mut live_account = sample_account("api", AccountType::Api);
+        live_account.label = "Live API".into();
+        cfg.enroll_account_as_current(AgentType::Claude, live_account)
+            .unwrap();
+
+        assert_eq!(cfg.claude.current.as_deref(), Some("api"));
+        assert_eq!(cfg.claude.accounts.len(), 2);
+        assert_eq!(cfg.claude.accounts[1].label, "Live API");
     }
 
     #[test]

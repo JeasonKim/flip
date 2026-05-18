@@ -42,6 +42,13 @@ pub fn resolve_tray_panel_visibility_change(is_tray_selected: bool) -> TrayPanel
     }
 }
 
+pub fn should_hide_tray_panel_after_focus_change(
+    is_tray_selected: bool,
+    is_popup_focused: bool,
+) -> bool {
+    is_tray_selected && !is_popup_focused
+}
+
 pub fn calculate_macos_popup_origin(
     tray_anchor: TrayAnchorFrame,
     popup_size: PopupFrameSize,
@@ -109,8 +116,9 @@ impl From<PopupOrigin> for tauri::PhysicalPosition<i32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_macos_popup_origin, resolve_tray_panel_visibility_change, PopupFrameSize,
-        PopupOrigin, TrayAnchorFrame, TrayPanelVisibilityChange, WorkAreaFrame,
+        calculate_macos_popup_origin, resolve_tray_panel_visibility_change,
+        should_hide_tray_panel_after_focus_change, PopupFrameSize, PopupOrigin, TrayAnchorFrame,
+        TrayPanelVisibilityChange, WorkAreaFrame,
     };
 
     #[test]
@@ -127,6 +135,21 @@ mod tests {
             resolve_tray_panel_visibility_change(true),
             TrayPanelVisibilityChange::Hide
         );
+    }
+
+    #[test]
+    fn 面板失焦且托盘已选中时应该收起() {
+        assert!(should_hide_tray_panel_after_focus_change(true, false));
+    }
+
+    #[test]
+    fn 面板仍聚焦时不应该收起() {
+        assert!(!should_hide_tray_panel_after_focus_change(true, true));
+    }
+
+    #[test]
+    fn 托盘未选中时失焦不应该触发收起() {
+        assert!(!should_hide_tray_panel_after_focus_change(false, false));
     }
 
     #[test]

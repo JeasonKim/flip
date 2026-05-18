@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentId,
+  SessionAgentId,
   FlipConfig,
   Account,
   QuotaResult,
@@ -11,6 +12,10 @@ import type {
 
 export async function listProfiles(): Promise<FlipConfig> {
   return invoke<FlipConfig>("list_profiles");
+}
+
+export async function reconcileLiveProfiles(): Promise<FlipConfig> {
+  return invoke<FlipConfig>("reconcile_live_profiles");
 }
 
 export async function flipAccount(
@@ -58,7 +63,7 @@ export async function renameAccount(
 }
 
 export async function scanSessions(
-  agentFilter?: AgentId,
+  agentFilter?: SessionAgentId,
   offset = 0,
   limit = 20,
 ): Promise<SessionMeta[]> {

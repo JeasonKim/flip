@@ -1,6 +1,16 @@
 import { motion } from "framer-motion";
 import type { SessionMeta } from "../../types/profile";
 
+const AGENT_BADGE: Record<string, { label: string; color: string }> = {
+  claude: { label: "CC", color: "text-violet-400" },
+  codex: { label: "CX", color: "text-emerald-400" },
+  opencode: { label: "OC", color: "text-amber-400" },
+};
+
+function agentBadge(agent: string) {
+  return AGENT_BADGE[agent] ?? { label: agent.slice(0, 2).toUpperCase(), color: "text-gray-400" };
+}
+
 function formatDate(ts: number | null): string {
   if (!ts) return "—";
   const diffSec = Math.floor((Date.now() - ts) / 1000);
@@ -17,7 +27,7 @@ function formatDate(ts: number | null): string {
 
 interface SessionListProps {
   sessions: SessionMeta[];
-  selectedId: string | null;
+  selectedKey: string | null;
   hasMore: boolean;
   onSelect: (session: SessionMeta) => void;
   onLoadMore: () => void;
@@ -25,7 +35,7 @@ interface SessionListProps {
 
 export default function SessionList({
   sessions,
-  selectedId,
+  selectedKey,
   hasMore,
   onSelect,
   onLoadMore,
@@ -39,20 +49,23 @@ export default function SessionList({
             layout
             onClick={() => onSelect(s)}
             className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors ${
-              selectedId === s.session_id
+              selectedKey === `${s.agent}-${s.session_id}`
                 ? "bg-white/15 ring-1 ring-white/20"
                 : "hover:bg-white/5"
             }`}
           >
             <div className="flex items-center gap-2">
               {/* Agent 标识 */}
-              <span
-                className={`text-[10px] uppercase font-bold tracking-wider shrink-0 ${
-                  s.agent === "claude" ? "text-violet-400" : "text-emerald-400"
-                }`}
-              >
-                {s.agent === "claude" ? "CC" : "CX"}
-              </span>
+              {(() => {
+                const badge = agentBadge(s.agent);
+                return (
+                  <span
+                    className={`text-[10px] uppercase font-bold tracking-wider shrink-0 ${badge.color}`}
+                  >
+                    {badge.label}
+                  </span>
+                );
+              })()}
               {/* 标题 */}
               <span className="text-sm text-gray-200 truncate flex-1">
                 {s.title}

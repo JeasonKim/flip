@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import type { AgentConfig, AgentId, Account, ModelInfo } from "../../types/profile";
+import type {
+  AgentConfig,
+  AgentId,
+  Account,
+  ModelInfo,
+} from "../../types/profile";
 import { useQuota } from "../../hooks/useQuota";
 import { readModelInfo } from "../../lib/invoke";
 import AccountItem from "./AccountItem";
@@ -19,7 +24,7 @@ interface AgentSectionProps {
   onFlip: (agent: AgentId, accountId: string) => Promise<void>;
   onCapture: (agent: AgentId) => Promise<void>;
   onDismiss: (agent: AgentId, accountId: string) => Promise<void>;
-  onAccountChanged?: () => void;
+  onAccountChanged?: () => Promise<void> | void;
 }
 
 export default function AgentSection({
@@ -35,9 +40,17 @@ export default function AgentSection({
   const meta = agentMeta[agent];
 
   useEffect(() => {
-    readModelInfo(agent).then(setModelInfo).catch(() => {});
+    readModelInfo(agent)
+      .then(setModelInfo)
+      .catch((error) => {
+        console.warn(`[model-info] read failed agent=${agent}`, error);
+      });
     const timer = setInterval(() => {
-      readModelInfo(agent).then(setModelInfo).catch(() => {});
+      readModelInfo(agent)
+        .then(setModelInfo)
+        .catch((error) => {
+          console.warn(`[model-info] refresh failed agent=${agent}`, error);
+        });
     }, 30_000);
     return () => clearInterval(timer);
   }, [agent, agentConfig.current]);
@@ -47,7 +60,12 @@ export default function AgentSection({
     (a) => a.id === agentConfig.current,
   );
   const showQuota = activeAccount?.type === "plan";
-  const { tiers, loading: quotaLoading, refresh: refreshQuota } = useQuota(agent, showQuota);
+  const {
+    tiers,
+    loading: quotaLoading,
+    error: quotaError,
+    refresh: refreshQuota,
+  } = useQuota(agent, showQuota);
 
   return (
     <div className="space-y-2">
@@ -99,10 +117,21 @@ export default function AgentSection({
                       {showQuotaHere && (
                         <div className="space-y-1 pl-5 pt-1">
                           {quotaLoading && tiers.length === 0 && (
-                            <p className="text-[10px] text-gray-500">Loading quota...</p>
+                            <p className="text-[10px] text-gray-500">
+                              Loading quota...
+                            </p>
+                          )}
+                          {quotaError && tiers.length === 0 && (
+                            <p className="text-[10px] text-red-400">
+                              {quotaError}
+                            </p>
                           )}
                           {tiers.map((tier) => (
-                            <QuotaBar key={tier.name} tier={tier} onExpired={refreshQuota} />
+                            <QuotaBar
+                              key={tier.name}
+                              tier={tier}
+                              onExpired={refreshQuota}
+                            />
                           ))}
                         </div>
                       )}

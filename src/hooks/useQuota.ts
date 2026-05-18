@@ -17,9 +17,13 @@ export function useQuota(agent: AgentId, enabled: boolean) {
         setTiers(result.tiers);
         setError(null);
       } else {
+        console.warn(
+          `[quota] fetch failed agent=${agent}: ${result.error ?? "unknown error"}`,
+        );
         setError(result.error ?? "unknown error");
       }
     } catch (e) {
+      console.warn(`[quota] fetch threw agent=${agent}`, e);
       setError(String(e));
     } finally {
       setLoading(false);

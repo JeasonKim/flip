@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import type { AgentId, FlipConfig } from "../types/profile";
 import * as api from "../lib/invoke";
 
@@ -12,6 +13,15 @@ export function useProfiles() {
       const data = await api.listProfiles();
       setConfig(data);
       setError(null);
+      api
+        .reconcileLiveProfiles()
+        .then((liveConfig) => {
+          setConfig(liveConfig);
+          setError(null);
+        })
+        .catch((e) => {
+          setError(String(e));
+        });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -21,6 +31,31 @@ export function useProfiles() {
 
   useEffect(() => {
     reload();
+  }, [reload]);
+
+  useEffect(() => {
+    window.addEventListener("focus", reload);
+    return () => window.removeEventListener("focus", reload);
+  }, [reload]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listen("flip-popup-shown", reload)
+      .then((release) => {
+        if (disposed) {
+          release();
+          return;
+        }
+        unlisten = release;
+      })
+      .catch((error) => {
+        console.warn("[profiles] failed to listen popup shown event", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [reload]);
 
   const flip = useCallback(

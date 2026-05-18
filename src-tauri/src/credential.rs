@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
@@ -23,15 +25,12 @@ pub fn read_claude_credential() -> Result<Credential, String> {
 
 #[cfg(target_os = "macos")]
 fn read_claude_from_keychain() -> Result<Credential, String> {
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
-        .output()
-        .map_err(|e| format!("failed to run security command: {e}"))?;
+    let output = run_security_command(&[
+        "find-generic-password",
+        "-s",
+        "Claude Code-credentials",
+        "-w",
+    ])?;
 
     if !output.status.success() {
         return Err("keychain: no matching credential found".into());
@@ -85,21 +84,40 @@ fn parse_claude_credential_json(json_text: &str) -> Result<Credential, String> {
 // -- Codex 凭据读取 --
 
 pub fn read_codex_credential() -> Result<Credential, String> {
+    let file_credential = read_codex_from_file();
     #[cfg(target_os = "macos")]
     {
-        if let Ok(cred) = read_codex_from_keychain() {
-            return Ok(cred);
-        }
+        return choose_codex_live_credential(file_credential, read_codex_from_keychain());
     }
-    read_codex_from_file()
+    #[cfg(not(target_os = "macos"))]
+    {
+        file_credential
+    }
+}
+
+fn choose_codex_live_credential(
+    file_credential: Result<Credential, String>,
+    keychain_credential: Result<Credential, String>,
+) -> Result<Credential, String> {
+    match file_credential {
+        Ok(credential) => Ok(credential),
+        Err(file_err) => match keychain_credential {
+            Ok(credential) => {
+                log::warn!(
+                    "[credential] using Codex keychain credential because live auth file could not be read: {file_err}"
+                );
+                Ok(credential)
+            }
+            Err(keychain_err) => Err(format!(
+                "codex credential unavailable: live auth file error: {file_err}; keychain error: {keychain_err}"
+            )),
+        },
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn read_codex_from_keychain() -> Result<Credential, String> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", "Codex Auth", "-w"])
-        .output()
-        .map_err(|e| format!("failed to run security command: {e}"))?;
+    let output = run_security_command(&["find-generic-password", "-s", "Codex Auth", "-w"])?;
 
     if !output.status.success() {
         return Err("keychain: no matching credential found".into());
@@ -137,12 +155,12 @@ fn parse_codex_credential_json(json_text: &str) -> Result<Credential, String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Codex token 过期：last_refresh 超过 8 天
-    let expired = val
-        .get("last_refresh")
-        .and_then(|v| v.as_str())
-        .map(|s| is_codex_token_stale(s))
-        .unwrap_or(false);
+    let expired = codex_access_token_expired(&access_token).unwrap_or_else(|| {
+        val.get("last_refresh")
+            .and_then(|v| v.as_str())
+            .map(|s| is_codex_token_stale(s))
+            .unwrap_or(false)
+    });
 
     Ok(Credential {
         access_token,
@@ -167,12 +185,19 @@ pub fn write_claude_keychain(json: &serde_json::Value) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn read_keychain_raw_json(service: &str) -> Option<serde_json::Value> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", service, "-w"])
-        .output()
-        .ok()?;
+    let output = match run_security_command(&["find-generic-password", "-s", service, "-w"]) {
+        Ok(output) => output,
+        Err(err) => {
+            log::warn!("[credential] keychain raw read failed service={service}: {err}");
+            return None;
+        }
+    };
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "[credential] keychain raw read returned non-success service={service}: {stderr}"
+        );
         return None;
     }
 
@@ -187,17 +212,28 @@ fn read_keychain_raw_json(service: &str) -> Option<serde_json::Value> {
 
 #[cfg(target_os = "macos")]
 fn read_keychain_account(service: &str) -> Option<String> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", service])
-        .output()
-        .ok()?;
+    let output = match run_security_command(&["find-generic-password", "-s", service]) {
+        Ok(output) => output,
+        Err(err) => {
+            log::warn!("[credential] keychain account read failed service={service}: {err}");
+            return None;
+        }
+    };
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!(
+            "[credential] keychain account read returned non-success service={service}: {stderr}"
+        );
         return None;
     }
 
     // 从输出中解析 "acct"<blob>="xxx" 行
-    let text = String::from_utf8(output.stdout).ok()?;
+    let text = if output.stdout.is_empty() {
+        String::from_utf8(output.stderr).ok()?
+    } else {
+        String::from_utf8(output.stdout).ok()?
+    };
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("\"acct\"") {
@@ -221,25 +257,80 @@ fn write_keychain_json(service: &str, json: &serde_json::Value) -> Result<(), St
     let account = read_keychain_account(service).unwrap_or_else(|| "default".into());
 
     // -U: 如果已存在则更新
-    let output = std::process::Command::new("security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-s",
-            service,
-            "-a",
-            &account,
-            "-w",
-            &json_str,
-        ])
-        .output()
-        .map_err(|e| format!("failed to run security command: {e}"))?;
+    let output = run_security_command(&[
+        "add-generic-password",
+        "-U",
+        "-s",
+        service,
+        "-a",
+        &account,
+        "-w",
+        &json_str,
+    ])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("keychain write failed: {stderr}"));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+const SECURITY_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(target_os = "macos")]
+fn run_security_command(args: &[&str]) -> Result<Output, String> {
+    run_command_with_timeout("security", args, SECURITY_COMMAND_TIMEOUT)
+}
+
+fn run_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn command program={program}: {e}"))?;
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.wait_with_output().map_err(|e| {
+                    format!("failed to collect command output program={program}: {e}")
+                });
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    if let Err(err) = child.kill() {
+                        log::warn!(
+                            "[credential] failed to kill timed out command program={program} args={args:?}: {err}"
+                        );
+                    }
+                    let _ = child.wait();
+                    return Err(format!(
+                        "command timed out program={program} timeout_ms={} args={args:?}",
+                        timeout.as_millis()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                if let Err(kill_err) = child.kill() {
+                    log::warn!(
+                        "[credential] failed to kill errored command program={program} args={args:?}: {kill_err}"
+                    );
+                }
+                let _ = child.wait();
+                return Err(format!(
+                    "failed while waiting for command program={program} args={args:?}: {err}"
+                ));
+            }
+        }
+    }
 }
 
 // -- 时间工具 --
@@ -281,6 +372,55 @@ fn is_codex_token_stale(last_refresh: &str) -> bool {
     age.num_seconds() > 8 * 24 * 3600
 }
 
+fn codex_access_token_expired(access_token: &str) -> Option<bool> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = base64_url_decode(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let exp = claims.get("exp")?.as_u64()?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Some(exp < now_secs)
+}
+
+fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
+    let mut s: String = input
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    decode_base64_standard(&s)
+}
+
+fn decode_base64_standard(input: &str) -> Option<Vec<u8>> {
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut buf = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in input.as_bytes() {
+        if b == b'=' {
+            break;
+        }
+        let val = table.iter().position(|&t| t == b)? as u32;
+        acc = (acc << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,9 +451,86 @@ mod tests {
     }
 
     #[test]
+    fn parse_codex_credential_prefers_jwt_exp_over_stale_last_refresh() {
+        let access_token = jwt_with_exp(4_102_444_800);
+        let json = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{}","account_id":"user-123"}},"last_refresh":"2020-01-01T00:00:00Z"}}"#,
+            access_token
+        );
+
+        let cred = parse_codex_credential_json(&json).unwrap();
+
+        assert!(!cred.expired);
+    }
+
+    #[test]
+    fn parse_codex_credential_marks_expired_jwt_as_expired() {
+        let access_token = jwt_with_exp(946_684_800);
+        let json = format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{}","account_id":"user-123"}},"last_refresh":"2099-01-01T00:00:00Z"}}"#,
+            access_token
+        );
+
+        let cred = parse_codex_credential_json(&json).unwrap();
+
+        assert!(cred.expired);
+    }
+
+    #[test]
+    fn codex_credential_prefers_live_file_over_keychain() {
+        let live_file = Ok(Credential {
+            access_token: "file-token".into(),
+            account_id: Some("file-account".into()),
+            expired: false,
+        });
+        let keychain = Ok(Credential {
+            access_token: "keychain-token".into(),
+            account_id: Some("keychain-account".into()),
+            expired: true,
+        });
+
+        let cred = choose_codex_live_credential(live_file, keychain).unwrap();
+
+        assert_eq!(cred.access_token, "file-token");
+        assert_eq!(cred.account_id.as_deref(), Some("file-account"));
+        assert!(!cred.expired);
+    }
+
+    #[test]
+    fn codex_credential_falls_back_to_keychain_when_live_file_missing() {
+        let cred = choose_codex_live_credential(
+            Err("auth file not found".into()),
+            Ok(Credential {
+                access_token: "keychain-token".into(),
+                account_id: Some("keychain-account".into()),
+                expired: false,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(cred.access_token, "keychain-token");
+        assert_eq!(cred.account_id.as_deref(), Some("keychain-account"));
+    }
+
+    #[test]
     fn codex_stale_token_detection() {
         assert!(is_codex_token_stale("2020-01-01T00:00:00Z"));
         assert!(!is_codex_token_stale("2099-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn command_timeout_helper_returns_output_before_deadline() {
+        let output =
+            run_command_with_timeout("sh", &["-c", "printf hello"], Duration::from_secs(1))
+                .unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "hello");
+    }
+
+    #[test]
+    fn command_timeout_helper_aborts_slow_command() {
+        let err = run_command_with_timeout("sh", &["-c", "sleep 1"], Duration::from_millis(100))
+            .unwrap_err();
+        assert!(err.contains("timed out"));
     }
 
     #[test]
@@ -333,5 +550,35 @@ mod tests {
     fn timestamp_not_expired_future() {
         let val = serde_json::json!(9999999999999i64);
         assert!(!is_timestamp_expired(&val));
+    }
+
+    fn jwt_with_exp(exp: u64) -> String {
+        let payload = format!(r#"{{"exp":{exp}}}"#);
+        format!(
+            "eyJhbGciOiJSUzI1NiJ9.{}.sig",
+            base64_url_encode(payload.as_bytes())
+        )
+    }
+
+    fn base64_url_encode(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut output = String::new();
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = *chunk.get(1).unwrap_or(&0);
+            let b2 = *chunk.get(2).unwrap_or(&0);
+            let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | b2 as u32;
+
+            output.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+            output.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+            if chunk.len() >= 2 {
+                output.push(TABLE[((triple >> 6) & 0x3f) as usize] as char);
+            }
+            if chunk.len() == 3 {
+                output.push(TABLE[(triple & 0x3f) as usize] as char);
+            }
+        }
+        output
     }
 }

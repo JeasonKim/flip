@@ -118,12 +118,8 @@ pub fn resolve_claude_live_current_account(
             }
         }
         AccountType::Api => {
-            let live_api_key = snapshot
-                .settings
-                .as_ref()
-                .and_then(|settings| settings.get("apiKey"))
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty());
+            // 顶层 apiKey 或 env.ANTHROPIC_AUTH_TOKEN 均作为身份标识
+            let live_api_key = extract_live_claude_api_key(snapshot.settings.as_ref());
 
             LiveCurrentAccountMatch {
                 account_id: live_api_key.and_then(|api_key| {
@@ -131,12 +127,7 @@ pub fn resolve_claude_live_current_account(
                         .iter()
                         .find(|account| {
                             account.account_type == AccountType::Api
-                                && account
-                                    .credentials
-                                    .as_ref()
-                                    .and_then(|credentials| credentials.get("apiKey"))
-                                    .and_then(|value| value.as_str())
-                                    == Some(api_key)
+                                && saved_claude_api_key_matches(account, api_key)
                         })
                         .map(|account| account.id.clone())
                 }),
@@ -218,6 +209,45 @@ fn read_claude_oauth(credentials: &serde_json::Value) -> Option<&serde_json::Val
         .or_else(|| credentials.get("claude.ai_oauth"))
 }
 
+/// 从 live settings 中提取 API Key（顶层 apiKey 或 env.ANTHROPIC_AUTH_TOKEN）
+fn extract_live_claude_api_key(settings: Option<&serde_json::Value>) -> Option<&str> {
+    let s = settings?;
+    s.get("apiKey")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            s.get("env")
+                .and_then(|e| {
+                    e.get("ANTHROPIC_AUTH_TOKEN")
+                        .or_else(|| e.get("ANTHROPIC_API_KEY"))
+                })
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// 检查已保存账号的 API Key 是否与 live key 匹配（支持顶层和 env 两种格式）
+fn saved_claude_api_key_matches(account: &Account, live_key: &str) -> bool {
+    let Some(creds) = account.credentials.as_ref() else {
+        return false;
+    };
+    if creds
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| k == live_key)
+    {
+        return true;
+    }
+    creds
+        .get("env")
+        .and_then(|e| {
+            e.get("ANTHROPIC_AUTH_TOKEN")
+                .or_else(|| e.get("ANTHROPIC_API_KEY"))
+        })
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| k == live_key)
+}
+
 fn agent_name(agent_type: AgentType) -> &'static str {
     match agent_type {
         AgentType::Claude => "claude",
@@ -272,6 +302,84 @@ mod tests {
         );
 
         assert_eq!(live_match.account_id.as_deref(), Some("openrouter-1"));
+    }
+
+    #[test]
+    fn resolve_claude_live_current_account_matches_env_auth_token() {
+        let accounts = vec![sample_account(
+            "zhipu-1",
+            AccountType::Api,
+            Some(serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": "zhipu-key",
+                    "ANTHROPIC_MODEL": "glm-5.1"
+                }
+            })),
+            None,
+        )];
+
+        let live_match = resolve_claude_live_current_account(
+            &accounts,
+            &ClaudeLiveSnapshot {
+                settings: Some(serde_json::json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+                        "ANTHROPIC_AUTH_TOKEN": "zhipu-key",
+                        "ANTHROPIC_MODEL": "glm-5.1"
+                    }
+                })),
+                credentials: None,
+            },
+        );
+
+        assert_eq!(live_match.account_id.as_deref(), Some("zhipu-1"));
+    }
+
+    #[test]
+    fn resolve_claude_live_current_account_prefers_api_when_oauth_also_exists() {
+        let accounts = vec![
+            sample_account(
+                "packy-api",
+                AccountType::Api,
+                Some(serde_json::json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://www.packyapi.com",
+                        "ANTHROPIC_AUTH_TOKEN": "packy-key"
+                    }
+                })),
+                None,
+            ),
+            sample_account(
+                "claude-plan",
+                AccountType::Plan,
+                Some(serde_json::json!({
+                    "claudeAiOauth": { "refreshToken": "refresh-token" }
+                })),
+                None,
+            ),
+        ];
+
+        let live_match = resolve_claude_live_current_account(
+            &accounts,
+            &ClaudeLiveSnapshot {
+                settings: Some(serde_json::json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://www.packyapi.com",
+                        "ANTHROPIC_AUTH_TOKEN": "packy-key"
+                    }
+                })),
+                credentials: Some(serde_json::json!({
+                    "claudeAiOauth": { "refreshToken": "refresh-token" }
+                })),
+            },
+        );
+
+        assert_eq!(live_match.account_id.as_deref(), Some("packy-api"));
+        assert!(live_match
+            .live_identity
+            .as_deref()
+            .is_some_and(|identity| identity.starts_with("claude-api:")));
     }
 
     #[test]

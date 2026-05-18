@@ -202,60 +202,111 @@ pub fn parse_messages(source_path: &str) -> Result<Vec<SessionMessage>, String> 
         let timestamp = parse_timestamp(&val);
         let line_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-        if line_type != "response_item" {
-            continue;
-        }
+        match line_type {
+            "response_item" => {
+                let Some(payload) = val.get("payload") else {
+                    continue;
+                };
 
-        let Some(payload) = val.get("payload") else {
-            continue;
-        };
+                let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-        let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match payload_type {
-            "message" => {
-                let role = payload
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let content = extract_content_text(payload.get("content"));
-                if !content.trim().is_empty() {
-                    messages.push(SessionMessage {
-                        role,
-                        content,
-                        timestamp,
-                    });
+                match payload_type {
+                    "message" => {
+                        let role = payload
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let content = extract_content_text(payload.get("content"));
+                        append_codex_message(&mut messages, role, content, timestamp);
+                    }
+                    "function_call" => {
+                        let name = payload
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let args = payload
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        append_codex_message(
+                            &mut messages,
+                            "assistant".into(),
+                            format!("[Tool: {}] {}", name, args),
+                            timestamp,
+                        );
+                    }
+                    "function_call_output" => {
+                        let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                        append_codex_message(
+                            &mut messages,
+                            "tool".into(),
+                            output.to_string(),
+                            timestamp,
+                        );
+                    }
+                    _ => {}
                 }
             }
-            "function_call" => {
-                let name = payload
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let args = payload
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                messages.push(SessionMessage {
-                    role: "assistant".into(),
-                    content: format!("[Tool: {}] {}", name, args),
-                    timestamp,
-                });
-            }
-            "function_call_output" => {
-                let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
-                messages.push(SessionMessage {
-                    role: "tool".into(),
-                    content: output.to_string(),
-                    timestamp,
-                });
+            "event_msg" => {
+                let Some(payload) = val.get("payload") else {
+                    continue;
+                };
+                if payload.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
+                    let content = payload
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    append_codex_message(&mut messages, "assistant".into(), content, timestamp);
+                }
             }
             _ => {}
         }
     }
 
     Ok(messages)
+}
+
+fn append_codex_message(
+    messages: &mut Vec<SessionMessage>,
+    role: String,
+    content: String,
+    timestamp: Option<i64>,
+) {
+    if content.trim().is_empty() {
+        return;
+    }
+
+    if messages
+        .last()
+        .is_some_and(|last| is_duplicate_codex_message(last, &role, &content, timestamp))
+    {
+        return;
+    }
+
+    messages.push(SessionMessage {
+        role,
+        content,
+        timestamp,
+    });
+}
+
+fn is_duplicate_codex_message(
+    last: &SessionMessage,
+    role: &str,
+    content: &str,
+    timestamp: Option<i64>,
+) -> bool {
+    if last.role != role || last.content != content {
+        return false;
+    }
+
+    match (last.timestamp, timestamp) {
+        (Some(left), Some(right)) => (left - right).abs() <= 1000,
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// 从 content 字段提取文本，支持三种格式：
@@ -342,6 +393,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn extract_uuid_from_rollout_filename() {
@@ -349,5 +401,51 @@ mod tests {
             "rollout-2026-03-31T12-58-23-019d4241-d505-7d02-b5be-2af94d1313eb.jsonl",
         );
         assert_eq!(uuid, "019d4241-d505-7d02-b5be-2af94d1313eb");
+    }
+
+    #[test]
+    fn parse_messages_uses_agent_message_event_when_response_item_is_missing() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &source,
+            [
+                r#"{"timestamp":"2026-05-12T15:01:17.006Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with OK only."}]}}"#,
+                r#"{"timestamp":"2026-05-12T15:01:20.484Z","type":"event_msg","payload":{"type":"agent_message","message":"OK","phase":"final_answer","memory_citation":null}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write");
+
+        let messages = parse_messages(source.to_str().expect("path")).expect("parse");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "Reply with OK only.");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "OK");
+    }
+
+    #[test]
+    fn parse_messages_deduplicates_agent_message_event_and_response_item_pair() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &source,
+            [
+                r#"{"timestamp":"2026-05-12T10:46:08.364Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with OK only."}]}}"#,
+                r#"{"timestamp":"2026-05-12T10:46:09.447Z","type":"event_msg","payload":{"type":"agent_message","message":"OK","phase":"final_answer","memory_citation":null}}"#,
+                r#"{"timestamp":"2026-05-12T10:46:09.448Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}],"phase":"final_answer"}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write");
+
+        let messages = parse_messages(source.to_str().expect("path")).expect("parse");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content, "OK");
     }
 }

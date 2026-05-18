@@ -1,5 +1,7 @@
 export type AccountType = "plan" | "api";
 export type AgentId = "claude" | "codex";
+/// 会话查看支持的 agent（只读，不涉及账号切换）
+export type SessionAgentId = "claude" | "codex" | "opencode";
 
 export interface Account {
   id: string;
