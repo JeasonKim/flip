@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SessionAgentId, SessionMeta, SessionMessage } from "../types/profile";
+import type {
+  SessionAgentId,
+  SessionMeta,
+  SessionMessage,
+  SessionRawContent,
+} from "../types/profile";
 import * as api from "../lib/invoke";
 
 const PAGE_SIZE = 20;
@@ -106,4 +111,43 @@ export function useSessionMessages(agent: string, sourcePath: string) {
   }, [agent, sourcePath]);
 
   return { messages, loading };
+}
+
+export function useSessionRawContent(
+  agent: string,
+  sourcePath: string,
+  enabled: boolean,
+) {
+  const [rawContent, setRawContent] = useState<SessionRawContent | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!enabled) return;
+
+    setLoading(true);
+    try {
+      const data = await api.loadSessionRawContent(agent, sourcePath);
+      setRawContent(data);
+      setError(null);
+    } catch (loadError) {
+      console.warn(
+        `[sessions] raw content load failed agent=${agent} source=${sourcePath}`,
+        loadError,
+      );
+      setError(String(loadError));
+      setRawContent(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [agent, sourcePath, enabled]);
+
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    void refresh();
+  }, [enabled, refresh]);
+
+  return { rawContent, loading, error, refresh };
 }

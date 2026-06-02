@@ -565,6 +565,22 @@ pub async fn load_session_messages(
     session::load_messages(&agent, &source_path)
 }
 
+#[tauri::command]
+pub async fn load_session_raw_content(
+    agent: String,
+    source_path: String,
+) -> Result<session::SessionRawContent, String> {
+    session::load_raw_content(&agent, &source_path).map_err(|err| {
+        log::warn!(
+            "[sessions] raw content load failed agent={} source={}: {}",
+            agent,
+            source_path,
+            err
+        );
+        err
+    })
+}
+
 /// 在终端中恢复会话
 #[tauri::command]
 pub async fn resume_session(command: String, cwd: Option<String>) -> Result<(), String> {

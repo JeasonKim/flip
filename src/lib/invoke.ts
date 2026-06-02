@@ -8,6 +8,7 @@ import type {
   ModelInfo,
   SessionMeta,
   SessionMessage,
+  SessionRawContent,
 } from "../types/profile";
 
 export async function listProfiles(): Promise<FlipConfig> {
@@ -79,6 +80,16 @@ export async function loadSessionMessages(
   sourcePath: string,
 ): Promise<SessionMessage[]> {
   return invoke<SessionMessage[]>("load_session_messages", {
+    agent,
+    sourcePath,
+  });
+}
+
+export async function loadSessionRawContent(
+  agent: string,
+  sourcePath: string,
+): Promise<SessionRawContent> {
+  return invoke<SessionRawContent>("load_session_raw_content", {
     agent,
     sourcePath,
   });

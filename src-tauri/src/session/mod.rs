@@ -2,7 +2,12 @@ pub mod claude;
 pub mod codex;
 pub mod opencode;
 
+use std::io::{BufRead, BufReader};
+
 use serde::{Deserialize, Serialize};
+
+const RAW_RECORD_LIMIT: usize = 80;
+const RAW_STRING_CHAR_LIMIT: usize = 1200;
 
 /// 从文件 mtime 获取毫秒时间戳，用于排序和过滤
 pub(crate) fn file_mtime_millis(path: &std::path::Path) -> Option<i64> {
@@ -32,6 +37,23 @@ pub struct SessionMessage {
     pub role: String, // user, assistant, tool, system
     pub content: String,
     pub timestamp: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRawContent {
+    pub agent: String,
+    pub source_path: String,
+    pub records: Vec<SessionRawRecord>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRawRecord {
+    /// JSONL 会话中为 jsonl；OpenCode 中为 session / message / part。
+    pub section: String,
+    /// JSONL 行号或表内记录序号，从 1 开始。
+    pub index: usize,
+    pub value: serde_json::Value,
 }
 
 /// 扫描会话列表，支持分页和 agent 筛选
@@ -67,6 +89,104 @@ pub fn load_messages(agent: &str, source_path: &str) -> Result<Vec<SessionMessag
         "opencode" => opencode::parse_messages(source_path),
         _ => Err(format!("unknown agent: {}", agent)),
     }
+}
+
+/// 加载单个会话的原始结构视图。
+pub fn load_raw_content(agent: &str, source_path: &str) -> Result<SessionRawContent, String> {
+    let (records, truncated) = match agent {
+        "claude" | "codex" => load_jsonl_raw_records(source_path)?,
+        "opencode" => {
+            opencode::load_raw_records_with_truncation(source_path, RAW_STRING_CHAR_LIMIT)?
+        }
+        _ => return Err(format!("unknown agent: {}", agent)),
+    };
+
+    Ok(SessionRawContent {
+        agent: agent.to_string(),
+        source_path: source_path.to_string(),
+        records,
+        truncated,
+    })
+}
+
+fn load_jsonl_raw_records(source_path: &str) -> Result<(Vec<SessionRawRecord>, bool), String> {
+    let file = std::fs::File::open(source_path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    let mut truncated = false;
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if records.len() >= RAW_RECORD_LIMIT {
+            truncated = true;
+            break;
+        }
+
+        let (section, value) = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(value) => (
+                "jsonl".to_string(),
+                truncate_raw_value(value, RAW_STRING_CHAR_LIMIT),
+            ),
+            Err(err) => (
+                "jsonl_parse_error".to_string(),
+                serde_json::json!({
+                    "error": err.to_string(),
+                    "raw": truncate_raw_string(&line, RAW_STRING_CHAR_LIMIT),
+                }),
+            ),
+        };
+
+        records.push(SessionRawRecord {
+            section,
+            index: line_index + 1,
+            value,
+        });
+    }
+
+    Ok((records, truncated))
+}
+
+pub(crate) fn truncate_raw_value(
+    value: serde_json::Value,
+    max_string_chars: usize,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(truncate_raw_string(&text, max_string_chars))
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(|item| truncate_raw_value(item, max_string_chars))
+                .collect(),
+        ),
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, truncate_raw_value(value, max_string_chars)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn truncate_raw_string(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let prefix: String = value.chars().take(max_chars - 3).collect();
+    format!("{prefix}...")
 }
 
 /// 删除指定天数之前的会话文件
@@ -168,6 +288,7 @@ fn powershell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn macos_shell_command_quotes_cwd_with_spaces_and_single_quote() {
@@ -207,5 +328,73 @@ mod tests {
             script,
             "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', 'claude --resume s1')"
         );
+    }
+
+    #[test]
+    fn raw_value_truncates_nested_long_strings() {
+        let value = serde_json::json!({
+            "short": "keep",
+            "nested": {
+                "long": "abcdefghijklmnopqrstuvwxyz"
+            },
+            "items": ["abcdefghijklmnopqrstuvwxyz"]
+        });
+
+        let truncated = truncate_raw_value(value, 10);
+
+        assert_eq!(truncated["short"], "keep");
+        assert_eq!(truncated["nested"]["long"], "abcdefg...");
+        assert_eq!(truncated["items"][0], "abcdefg...");
+    }
+
+    #[test]
+    fn load_raw_content_routes_claude_jsonl_records() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("claude.jsonl");
+        std::fs::write(
+            &source,
+            [
+                r#"{"type":"user","message":{"role":"user","content":"hello"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":"abcdefghijklmnopqrstuvwxyz"}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write");
+
+        let raw = load_raw_content("claude", source.to_str().expect("path")).expect("raw");
+
+        assert_eq!(raw.agent, "claude");
+        assert_eq!(raw.records.len(), 2);
+        assert_eq!(raw.records[0].section, "jsonl");
+        assert_eq!(raw.records[0].index, 1);
+        assert_eq!(raw.records[0].value["type"], "user");
+        assert_eq!(
+            raw.records[1].value["message"]["content"],
+            "abcdefghijklmnopqrstuvwxyz"
+        );
+        assert!(!raw.truncated);
+    }
+
+    #[test]
+    fn load_raw_content_routes_codex_jsonl_records_and_keeps_parse_errors_visible() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &source,
+            [
+                r#"{"type":"session_meta","payload":{"id":"s1"}}"#,
+                "not-json",
+            ]
+            .join("\n"),
+        )
+        .expect("write");
+
+        let raw = load_raw_content("codex", source.to_str().expect("path")).expect("raw");
+
+        assert_eq!(raw.agent, "codex");
+        assert_eq!(raw.records.len(), 2);
+        assert_eq!(raw.records[0].value["type"], "session_meta");
+        assert_eq!(raw.records[1].section, "jsonl_parse_error");
+        assert_eq!(raw.records[1].value["raw"], "not-json");
     }
 }

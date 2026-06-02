@@ -148,6 +148,7 @@ pub fn run() {
             commands::rename_account,
             commands::scan_sessions,
             commands::load_session_messages,
+            commands::load_session_raw_content,
             commands::resume_session,
             commands::open_session_window,
             commands::purge_sessions,

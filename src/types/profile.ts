@@ -51,6 +51,19 @@ export interface SessionMessage {
   timestamp: number | null;
 }
 
+export interface SessionRawRecord {
+  section: string;
+  index: number;
+  value: unknown;
+}
+
+export interface SessionRawContent {
+  agent: string;
+  source_path: string;
+  records: SessionRawRecord[];
+  truncated: boolean;
+}
+
 export interface ModelInfo {
   model: string | null;
   thinking: string | null;

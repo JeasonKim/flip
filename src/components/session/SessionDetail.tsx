@@ -3,10 +3,13 @@ import type { SessionMeta } from "../../types/profile";
 import { useSessionMessages } from "../../hooks/useSessions";
 import { resumeSession } from "../../lib/invoke";
 import MessageBubble from "./MessageBubble";
+import SessionRawPanel from "./SessionRawPanel";
 
 interface SessionDetailProps {
   session: SessionMeta;
 }
+
+type SessionDetailView = "messages" | "raw";
 
 export default function SessionDetail({ session }: SessionDetailProps) {
   const { messages, loading } = useSessionMessages(
@@ -20,6 +23,7 @@ export default function SessionDetail({ session }: SessionDetailProps) {
   const [following, setFollowing] = useState(true);
   const [atTop, setAtTop] = useState(true);
   const [sessionIdCopied, setSessionIdCopied] = useState(false);
+  const [view, setView] = useState<SessionDetailView>("messages");
   // 用于检测用户主动滚动 vs 代码触发的滚动
   const programmaticScrollRef = useRef(false);
   const prevSnapshotRef = useRef("");
@@ -118,6 +122,20 @@ export default function SessionDetail({ session }: SessionDetailProps) {
           >
             {sessionIdCopied ? "已复制" : `ID ${session.session_id}`}
           </button>
+          <button
+            onClick={() =>
+              setView((current) =>
+                current === "raw" ? "messages" : "raw",
+              )
+            }
+            className={`shrink-0 px-3 py-1 text-[11px] rounded-md transition-colors ${
+              view === "raw"
+                ? "bg-white/20 text-gray-100"
+                : "bg-white/10 hover:bg-white/20 text-gray-300"
+            }`}
+          >
+            {view === "raw" ? "消息" : "原始结构"}
+          </button>
           {session.resume_command && (
             <button
               onClick={async () => {
@@ -165,25 +183,30 @@ export default function SessionDetail({ session }: SessionDetailProps) {
         </div>
       </div>
 
-      {/* 消息列表 */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-y-auto space-y-2 pr-1"
-      >
-        {loading ? (
-          <p className="text-sm text-gray-500 animate-pulse">
-            Loading messages...
-          </p>
-        ) : messages.length === 0 ? (
-          <p className="text-sm text-gray-500 italic">No messages found</p>
-        ) : (
-          messages.map((msg, i) => <MessageBubble key={i} message={msg} />)
-        )}
-      </div>
+      {view === "messages" ? (
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto space-y-2 pr-1"
+        >
+          {loading ? (
+            <p className="text-sm text-gray-500 animate-pulse">
+              Loading messages...
+            </p>
+          ) : messages.length === 0 ? (
+            <p className="text-sm text-gray-500 italic">No messages found</p>
+          ) : (
+            messages.map((msg, i) => <MessageBubble key={i} message={msg} />)
+          )}
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <SessionRawPanel session={session} active={view === "raw"} />
+        </div>
+      )}
 
       {/* 右上角：直达底部 */}
-      {!following && (
+      {view === "messages" && !following && (
         <button
           onClick={() => {
             setFollowing(true);
@@ -198,7 +221,7 @@ export default function SessionDetail({ session }: SessionDetailProps) {
       )}
 
       {/* 右下角：直达顶部 */}
-      {!atTop && (
+      {view === "messages" && !atTop && (
         <button
           onClick={() => {
             setAtTop(true);
