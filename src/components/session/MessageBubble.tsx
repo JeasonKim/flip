@@ -1,7 +1,16 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { Children, isValidElement, type ReactNode } from "react";
+import {
+  Children,
+  isValidElement,
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { Components } from "react-markdown";
 import type { SessionMessage } from "../../types/profile";
 import {
@@ -68,7 +77,7 @@ const markdownComponents: Components = {
   },
 };
 
-export default function MessageBubble({ message }: MessageBubbleProps) {
+function MessageBubble({ message }: MessageBubbleProps) {
   const style = roleStyle[message.role] ?? roleStyle.system;
   const isToolOutput = message.role === "tool";
   const markdownContent = normalizeMarkdownDiagrams(message.content);
@@ -87,9 +96,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
       {/* 消息内容 */}
       {isToolOutput ? (
-        <pre className="text-xs text-gray-400 whitespace-pre-wrap break-all max-h-40 overflow-y-auto font-mono">
-          {message.content}
-        </pre>
+        <ToolOutputBlock content={message.content} />
       ) : (
         <div className="prose prose-invert prose-sm max-w-none break-words
           prose-pre:bg-black/30 prose-pre:text-xs prose-code:text-xs">
@@ -103,6 +110,49 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         </div>
       )}
     </div>
+  );
+}
+
+export default memo(MessageBubble);
+
+interface ToolOutputBlockProps {
+  content: string;
+}
+
+function ToolOutputBlock({ content }: ToolOutputBlockProps) {
+  const toolOutputRef = useRef<HTMLPreElement>(null);
+  const [scrollActive, setScrollActive] = useState(false);
+
+  useEffect(() => {
+    setScrollActive(false);
+  }, [content]);
+
+  const activateToolScroll = useCallback(() => {
+    const toolOutput = toolOutputRef.current;
+    if (!toolOutput) {
+      return;
+    }
+
+    setScrollActive(toolOutput.scrollHeight > toolOutput.clientHeight + 1);
+  }, []);
+
+  const deactivateToolScroll = useCallback(() => {
+    setScrollActive(false);
+  }, []);
+
+  return (
+    <pre
+      ref={toolOutputRef}
+      onClick={activateToolScroll}
+      onMouseLeave={deactivateToolScroll}
+      className={`max-h-40 whitespace-pre-wrap break-all font-mono text-xs text-gray-400 ${
+        scrollActive ? "overflow-y-auto" : "overflow-y-hidden"
+      }`}
+      style={{ overscrollBehavior: scrollActive ? "contain" : "auto" }}
+      title={scrollActive ? "Tool output scroll active" : "Click to scroll tool output"}
+    >
+      {content}
+    </pre>
   );
 }
 

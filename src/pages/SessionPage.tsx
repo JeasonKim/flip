@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import type { SessionAgentId, SessionMeta } from "../types/profile";
 import { useSessions } from "../hooks/useSessions";
+import { sessionIdentityKey } from "../lib/sessionRefresh";
 import { purgeSessions } from "../lib/invoke";
 import SessionList from "../components/session/SessionList";
 import SessionDetail from "../components/session/SessionDetail";
@@ -30,7 +31,7 @@ function SessionPage() {
       setConfirmingPurge(null);
       try {
         const count = await purgeSessions(days);
-        setPurgeResult(`已删除 ${count} 个会话文件`);
+        setPurgeResult(`已删除 ${count} 个会话`);
         setTimeout(() => setPurgeResult(null), 3000);
         refresh();
       } catch (e) {
@@ -93,7 +94,7 @@ function SessionPage() {
                 ? "text-red-400 font-semibold"
                 : "text-gray-500 hover:text-red-400"
             }`}
-            title="删除 7 天前的会话"
+            title="删除最后活跃早于 7 天前的会话"
           >
             {confirmingPurge === 7 ? "确认删除?" : "清理 7d+"}
           </button>
@@ -104,7 +105,7 @@ function SessionPage() {
                 ? "text-red-400 font-semibold"
                 : "text-gray-500 hover:text-red-400"
             }`}
-            title="删除 30 天前的会话"
+            title="删除最后活跃早于 30 天前的会话"
           >
             {confirmingPurge === 30 ? "确认删除?" : "清理 30d+"}
           </button>
@@ -127,7 +128,7 @@ function SessionPage() {
             <SessionList
               sessions={sessions}
               selectedKey={
-                selected ? `${selected.agent}-${selected.session_id}` : null
+                selected ? sessionIdentityKey(selected) : null
               }
               hasMore={hasMore}
               onSelect={setSelected}
@@ -139,7 +140,7 @@ function SessionPage() {
         {/* 消息详情 */}
         <div className="flex-1 p-4 overflow-hidden">
           {selected ? (
-            <SessionDetail key={selected.session_id} session={selected} />
+            <SessionDetail key={sessionIdentityKey(selected)} session={selected} />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">
               Select a session to view messages

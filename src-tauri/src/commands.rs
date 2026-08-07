@@ -550,11 +550,11 @@ pub async fn scan_sessions(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<session::SessionMeta>, String> {
-    Ok(session::scan_sessions(
-        agent_filter.as_deref(),
-        offset,
-        limit,
-    ))
+    tokio::task::spawn_blocking(move || {
+        session::scan_sessions(agent_filter.as_deref(), offset, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -562,7 +562,19 @@ pub async fn load_session_messages(
     agent: String,
     source_path: String,
 ) -> Result<Vec<session::SessionMessage>, String> {
-    session::load_messages(&agent, &source_path)
+    tokio::task::spawn_blocking(move || session::load_messages(&agent, &source_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_session_source_revision(
+    agent: String,
+    source_path: String,
+) -> Result<session::SessionSourceRevision, String> {
+    tokio::task::spawn_blocking(move || session::read_source_revision(&agent, &source_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -570,15 +582,19 @@ pub async fn load_session_raw_content(
     agent: String,
     source_path: String,
 ) -> Result<session::SessionRawContent, String> {
-    session::load_raw_content(&agent, &source_path).map_err(|err| {
-        log::warn!(
-            "[sessions] raw content load failed agent={} source={}: {}",
-            agent,
-            source_path,
+    tokio::task::spawn_blocking(move || {
+        session::load_raw_content(&agent, &source_path).map_err(|err| {
+            log::warn!(
+                "[sessions] raw content load failed agent={} source={}: {}",
+                agent,
+                source_path,
+                err
+            );
             err
-        );
-        err
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 在终端中恢复会话

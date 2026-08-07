@@ -46,7 +46,9 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
                 continue;
             }
 
-            if let Some(meta) = extract_session_meta(&path, &project_dir, &fname) {
+            if let Some(meta) = super::cached_file_session_meta("claude", &path, || {
+                extract_session_meta(&path, &project_dir, &fname)
+            }) {
                 sessions.push(meta);
             }
         }

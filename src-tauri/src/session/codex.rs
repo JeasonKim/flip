@@ -54,7 +54,9 @@ fn collect_jsonl_files(dir: &PathBuf, sessions: &mut Vec<SessionMeta>, depth: us
             continue;
         }
 
-        if let Some(meta) = extract_session_meta(&path, &fname) {
+        if let Some(meta) =
+            super::cached_file_session_meta("codex", &path, || extract_session_meta(&path, &fname))
+        {
             sessions.push(meta);
         }
     }
@@ -68,6 +70,7 @@ fn extract_session_meta(path: &PathBuf, fname: &str) -> Option<SessionMeta> {
     let mut session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
     let mut title: Option<String> = None;
+    let mut saw_session_meta = false;
 
     for line in &lines {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -76,10 +79,12 @@ fn extract_session_meta(path: &PathBuf, fname: &str) -> Option<SessionMeta> {
 
         let line_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-        if line_type == "session_meta" {
+        if line_type == "session_meta" && !saw_session_meta {
+            saw_session_meta = true;
             if let Some(payload) = val.get("payload") {
                 session_id = payload
                     .get("id")
+                    .or_else(|| payload.get("session_id"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 project_dir = payload
@@ -401,6 +406,35 @@ mod tests {
             "rollout-2026-03-31T12-58-23-019d4241-d505-7d02-b5be-2af94d1313eb.jsonl",
         );
         assert_eq!(uuid, "019d4241-d505-7d02-b5be-2af94d1313eb");
+    }
+
+    #[test]
+    fn extract_session_meta_keeps_current_fork_session_id() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp
+            .path()
+            .join("rollout-2026-08-07T17-20-50-current.jsonl");
+        std::fs::write(
+            &source,
+            [
+                r#"{"type":"session_meta","payload":{"id":"current-session","session_id":"current-session","cwd":"/current"}}"#,
+                r#"{"type":"session_meta","payload":{"id":"ancestor-session","session_id":"ancestor-session","cwd":"/ancestor"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Build the thing"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write");
+
+        let meta = extract_session_meta(
+            &source,
+            "rollout-2026-08-07T17-20-50-current.jsonl",
+        )
+        .expect("meta");
+
+        assert_eq!(meta.session_id, "current-session");
+        assert_eq!(meta.resume_command.as_deref(), Some("codex resume current-session"));
+        assert_eq!(meta.project_dir.as_deref(), Some("/current"));
+        assert_eq!(meta.title, "Build the thing");
     }
 
     #[test]

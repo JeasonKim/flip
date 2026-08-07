@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
-use super::{truncate_raw_value, SessionMessage, SessionMeta, SessionRawRecord};
-
-const RAW_SQLITE_ROW_LIMIT: usize = 80;
+use super::{
+    compact_raw_value, SessionMessage, SessionMeta, SessionRawRecord, SessionSourceRevision,
+};
 
 /// OpenCode 数据库候选路径。
 ///
@@ -224,11 +224,16 @@ pub fn parse_messages(source_path: &str) -> Result<Vec<SessionMessage>, String> 
     Ok(messages)
 }
 
+pub fn source_revision(source_path: &str) -> Result<SessionSourceRevision, String> {
+    let (db_path, _session_id) = parse_sqlite_source(source_path)
+        .ok_or_else(|| format!("invalid opencode source path: {source_path}"))?;
+
+    super::file_source_revision(&db_path)
+        .ok_or_else(|| format!("failed to read opencode db metadata: {}", db_path.display()))
+}
+
 /// 导出 OpenCode 会话在 SQLite 中的原始表结构。
-pub fn load_raw_records_with_truncation(
-    source_path: &str,
-    max_string_chars: usize,
-) -> Result<(Vec<SessionRawRecord>, bool), String> {
+pub fn load_raw_records(source_path: &str) -> Result<Vec<SessionRawRecord>, String> {
     let (db_path, session_id) = parse_sqlite_source(source_path)
         .ok_or_else(|| format!("invalid opencode source path: {source_path}"))?;
 
@@ -240,7 +245,7 @@ pub fn load_raw_records_with_truncation(
 
     let mut records = Vec::new();
 
-    if let Some(session) = load_raw_session_row(&conn, &session_id, max_string_chars)? {
+    if let Some(session) = load_raw_session_row(&conn, &session_id)? {
         records.push(SessionRawRecord {
             section: "session".into(),
             index: 1,
@@ -248,20 +253,13 @@ pub fn load_raw_records_with_truncation(
         });
     }
 
-    let (message_records, messages_truncated) =
-        load_raw_message_rows(&conn, &session_id, max_string_chars)?;
-    let (part_records, parts_truncated) = load_raw_part_rows(&conn, &session_id, max_string_chars)?;
-    records.extend(message_records);
-    records.extend(part_records);
+    records.extend(load_raw_message_rows(&conn, &session_id)?);
+    records.extend(load_raw_part_rows(&conn, &session_id)?);
 
-    Ok((records, messages_truncated || parts_truncated))
+    Ok(records)
 }
 
-fn load_raw_session_row(
-    conn: &Connection,
-    session_id: &str,
-    max_string_chars: usize,
-) -> Result<Option<Value>, String> {
+fn load_raw_session_row(conn: &Connection, session_id: &str) -> Result<Option<Value>, String> {
     let row = conn
         .query_row(
             "SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?1",
@@ -284,45 +282,36 @@ fn load_raw_session_row(
         .optional()
         .map_err(|e| format!("failed to query session row: {e}"))?;
 
-    Ok(row.map(|value| truncate_raw_value(value, max_string_chars)))
+    Ok(row.map(compact_raw_value))
 }
 
 fn load_raw_message_rows(
     conn: &Connection,
     session_id: &str,
-    max_string_chars: usize,
-) -> Result<(Vec<SessionRawRecord>, bool), String> {
+) -> Result<Vec<SessionRawRecord>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC LIMIT ?2",
+            "SELECT id, session_id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .map_err(|e| format!("failed to prepare raw message query: {e}"))?;
 
     let rows = stmt
-        .query_map(
-            rusqlite::params![session_id, (RAW_SQLITE_ROW_LIMIT + 1) as i64],
-            |row| {
-                let id: String = row.get(0)?;
-                let session_id: String = row.get(1)?;
-                let time_created: i64 = row.get(2)?;
-                let data: String = row.get(3)?;
-                Ok(serde_json::json!({
-                    "id": id,
-                    "session_id": session_id,
-                    "time_created": time_created,
-                    "data": parse_json_text_as_raw_value(&data, max_string_chars),
-                }))
-            },
-        )
+        .query_map([session_id], |row| {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let data: String = row.get(3)?;
+            Ok(serde_json::json!({
+                "id": id,
+                "session_id": session_id,
+                "time_created": time_created,
+                "data": parse_json_text_as_raw_value(&data),
+            }))
+        })
         .map_err(|e| format!("failed to query raw messages: {e}"))?;
 
     let mut records = Vec::new();
-    let mut truncated = false;
     for (index, row) in rows.enumerate() {
-        if index >= RAW_SQLITE_ROW_LIMIT {
-            truncated = true;
-            break;
-        }
         records.push(SessionRawRecord {
             section: "message".into(),
             index: index + 1,
@@ -330,47 +319,38 @@ fn load_raw_message_rows(
         });
     }
 
-    Ok((records, truncated))
+    Ok(records)
 }
 
 fn load_raw_part_rows(
     conn: &Connection,
     session_id: &str,
-    max_string_chars: usize,
-) -> Result<(Vec<SessionRawRecord>, bool), String> {
+) -> Result<Vec<SessionRawRecord>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, message_id, time_created, data FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC LIMIT ?2",
+            "SELECT id, session_id, message_id, time_created, data FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .map_err(|e| format!("failed to prepare raw part query: {e}"))?;
 
     let rows = stmt
-        .query_map(
-            rusqlite::params![session_id, (RAW_SQLITE_ROW_LIMIT + 1) as i64],
-            |row| {
-                let id: String = row.get(0)?;
-                let session_id: String = row.get(1)?;
-                let message_id: String = row.get(2)?;
-                let time_created: i64 = row.get(3)?;
-                let data: String = row.get(4)?;
-                Ok(serde_json::json!({
-                    "id": id,
-                    "session_id": session_id,
-                    "message_id": message_id,
-                    "time_created": time_created,
-                    "data": parse_json_text_as_raw_value(&data, max_string_chars),
-                }))
-            },
-        )
+        .query_map([session_id], |row| {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let message_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok(serde_json::json!({
+                "id": id,
+                "session_id": session_id,
+                "message_id": message_id,
+                "time_created": time_created,
+                "data": parse_json_text_as_raw_value(&data),
+            }))
+        })
         .map_err(|e| format!("failed to query raw parts: {e}"))?;
 
     let mut records = Vec::new();
-    let mut truncated = false;
     for (index, row) in rows.enumerate() {
-        if index >= RAW_SQLITE_ROW_LIMIT {
-            truncated = true;
-            break;
-        }
         records.push(SessionRawRecord {
             section: "part".into(),
             index: index + 1,
@@ -378,15 +358,15 @@ fn load_raw_part_rows(
         });
     }
 
-    Ok((records, truncated))
+    Ok(records)
 }
 
-fn parse_json_text_as_raw_value(text: &str, max_string_chars: usize) -> Value {
+fn parse_json_text_as_raw_value(text: &str) -> Value {
     match serde_json::from_str::<Value>(text) {
-        Ok(value) => truncate_raw_value(value, max_string_chars),
+        Ok(value) => compact_raw_value(value),
         Err(err) => serde_json::json!({
             "_parse_error": err.to_string(),
-            "raw": truncate_raw_value(Value::String(text.to_string()), max_string_chars),
+            "raw": compact_raw_value(Value::String(text.to_string())),
         }),
     }
 }
@@ -771,22 +751,23 @@ mod tests {
         drop(conn);
 
         let source = format!("sqlite:{}:ses_1", db.display());
-        let (records, truncated) =
-            load_raw_records_with_truncation(&source, 10).expect("raw records");
+        let records = load_raw_records(&source).expect("raw records");
 
-        assert!(!truncated);
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].section, "session");
         assert_eq!(records[0].value["id"], "ses_1");
         assert_eq!(records[1].section, "message");
         assert_eq!(records[1].value["data"]["role"], "assistant");
-        assert_eq!(records[1].value["data"]["extra"], "abcdefg...");
+        assert_eq!(
+            records[1].value["data"]["extra"],
+            "abcdefghijklmnopqrstuvwxyz"
+        );
         assert_eq!(records[2].section, "part");
         assert_eq!(records[2].value["data"]["type"], "text");
     }
 
     #[test]
-    fn load_raw_records_with_truncation_reports_message_row_limit() {
+    fn load_raw_records_exports_all_message_rows() {
         let temp = tempdir().expect("tempdir");
         let db = temp.path().join("opencode.db");
         let conn = Connection::open(&db).expect("open");
@@ -798,7 +779,7 @@ mod tests {
         )
         .expect("insert session");
 
-        for index in 0..(RAW_SQLITE_ROW_LIMIT + 1) {
+        for index in 0..85 {
             conn.execute(
                 "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
                 (
@@ -813,16 +794,14 @@ mod tests {
         drop(conn);
 
         let source = format!("sqlite:{}:ses_1", db.display());
-        let (records, truncated) =
-            load_raw_records_with_truncation(&source, 10).expect("raw records");
+        let records = load_raw_records(&source).expect("raw records");
 
-        assert!(truncated);
         assert_eq!(
             records
                 .iter()
                 .filter(|record| record.section == "message")
                 .count(),
-            RAW_SQLITE_ROW_LIMIT
+            85
         );
     }
 

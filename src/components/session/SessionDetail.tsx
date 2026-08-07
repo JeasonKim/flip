@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionMeta } from "../../types/profile";
 import { useSessionMessages } from "../../hooks/useSessions";
 import { resumeSession } from "../../lib/invoke";
-import MessageBubble from "./MessageBubble";
 import SessionRawPanel from "./SessionRawPanel";
+import VirtualMessageList from "./VirtualMessageList";
 
 interface SessionDetailProps {
   session: SessionMeta;
@@ -28,19 +28,23 @@ export default function SessionDetail({ session }: SessionDetailProps) {
   const programmaticScrollRef = useRef(false);
   const prevSnapshotRef = useRef("");
 
+  const markProgrammaticScroll = useCallback(() => {
+    programmaticScrollRef.current = true;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    programmaticScrollRef.current = true;
+    markProgrammaticScroll();
     el.scrollTop = el.scrollHeight;
-  }, []);
+  }, [markProgrammaticScroll]);
 
   const scrollToTop = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    programmaticScrollRef.current = true;
+    markProgrammaticScroll();
     el.scrollTop = 0;
-  }, []);
+  }, [markProgrammaticScroll]);
 
   // 内容变化时，如果处于跟随模式则自动滚到底部
   useEffect(() => {
@@ -187,7 +191,7 @@ export default function SessionDetail({ session }: SessionDetailProps) {
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto space-y-2 pr-1"
+          className="flex-1 overflow-y-auto pr-1"
         >
           {loading ? (
             <p className="text-sm text-gray-500 animate-pulse">
@@ -196,7 +200,12 @@ export default function SessionDetail({ session }: SessionDetailProps) {
           ) : messages.length === 0 ? (
             <p className="text-sm text-gray-500 italic">No messages found</p>
           ) : (
-            messages.map((msg, i) => <MessageBubble key={i} message={msg} />)
+            <VirtualMessageList
+              messages={messages}
+              scrollRef={scrollRef}
+              followTail={following}
+              onProgrammaticScroll={markProgrammaticScroll}
+            />
           )}
         </div>
       ) : (

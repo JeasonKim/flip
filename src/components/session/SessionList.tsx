@@ -1,5 +1,5 @@
-import { motion } from "framer-motion";
 import type { SessionMeta } from "../../types/profile";
+import { sessionIdentityKey } from "../../lib/sessionRefresh";
 
 const AGENT_BADGE: Record<string, { label: string; color: string }> = {
   claude: { label: "CC", color: "text-violet-400" },
@@ -44,12 +44,11 @@ export default function SessionList({
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto space-y-0.5">
         {sessions.map((s) => (
-          <motion.button
-            key={`${s.agent}-${s.session_id}`}
-            layout
+          <button
+            key={sessionIdentityKey(s)}
             onClick={() => onSelect(s)}
             className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors ${
-              selectedKey === `${s.agent}-${s.session_id}`
+              selectedKey === sessionIdentityKey(s)
                 ? "bg-white/15 ring-1 ring-white/20"
                 : "hover:bg-white/5"
             }`}
@@ -81,7 +80,7 @@ export default function SessionList({
                 {s.project_dir}
               </p>
             )}
-          </motion.button>
+          </button>
         ))}
       </div>
 

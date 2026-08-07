@@ -8,6 +8,7 @@ import type {
   ModelInfo,
   SessionMeta,
   SessionMessage,
+  SessionSourceRevision,
   SessionRawContent,
 } from "../types/profile";
 
@@ -80,6 +81,16 @@ export async function loadSessionMessages(
   sourcePath: string,
 ): Promise<SessionMessage[]> {
   return invoke<SessionMessage[]>("load_session_messages", {
+    agent,
+    sourcePath,
+  });
+}
+
+export async function readSessionSourceRevision(
+  agent: string,
+  sourcePath: string,
+): Promise<SessionSourceRevision> {
+  return invoke<SessionSourceRevision>("read_session_source_revision", {
     agent,
     sourcePath,
   });

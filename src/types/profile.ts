@@ -51,6 +51,11 @@ export interface SessionMessage {
   timestamp: number | null;
 }
 
+export interface SessionSourceRevision {
+  size_bytes: number | null;
+  modified_at: number | null;
+}
+
 export interface SessionRawRecord {
   section: string;
   index: number;
