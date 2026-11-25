@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 use crate::credential;
@@ -547,14 +548,36 @@ pub async fn rename_account(
 #[tauri::command]
 pub async fn scan_sessions(
     agent_filter: Option<String>,
+    source_filter: Option<String>,
     offset: usize,
     limit: usize,
 ) -> Result<Vec<session::SessionMeta>, String> {
     tokio::task::spawn_blocking(move || {
-        session::scan_sessions(agent_filter.as_deref(), offset, limit)
+        session::scan_sessions(
+            agent_filter.as_deref(),
+            source_filter.as_deref(),
+            offset,
+            limit,
+        )
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn list_session_sources() -> Result<Vec<session::sources::SessionSource>, String> {
+    tokio::task::spawn_blocking(session::sources::configured_sources)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn configure_session_sources(
+    sources: Vec<session::sources::SessionSourceConfig>,
+) -> Result<Vec<session::sources::SessionSource>, String> {
+    tokio::task::spawn_blocking(move || session::sources::configure_sources(sources))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -565,6 +588,50 @@ pub async fn load_session_messages(
     tokio::task::spawn_blocking(move || session::load_messages(&agent, &source_path))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_session_timeline(
+    agent: String,
+    source_path: String,
+) -> Result<session::SessionTimeline, String> {
+    tokio::task::spawn_blocking(move || session::load_timeline_entries(&agent, &source_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_session_system_prompts(
+    agent: String,
+    source_path: String,
+) -> Result<Vec<session::SessionPrompt>, String> {
+    tokio::task::spawn_blocking(move || session::load_system_prompts(&agent, &source_path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_session_entry_raw(
+    agent: String,
+    source_path: String,
+    raw_reference: session::SessionRawReference,
+) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || {
+        session::load_entry_raw_value(&agent, &source_path, &raw_reference).map_err(|error| {
+            log::warn!(
+                "[sessions] entry raw load failed agent={} source={} section={} index={} id={}: {}",
+                agent,
+                source_path,
+                raw_reference.section,
+                raw_reference.index,
+                raw_reference.record_id.as_deref().unwrap_or("none"),
+                error
+            );
+            error
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -698,4 +765,228 @@ pub async fn reveal_config_file() -> Result<(), String> {
         profile::save_profiles(&config)?;
     }
     open::that(&path).map_err(|e| format!("failed to open config: {}", e))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResolvedSessionResource {
+    Url(String),
+    Path(PathBuf),
+}
+
+#[tauri::command]
+pub async fn open_session_resource(
+    target: String,
+    project_dir: Option<String>,
+) -> Result<(), String> {
+    let resolved = resolve_session_resource_target(&target, project_dir.as_deref())?;
+    tokio::task::spawn_blocking(move || match resolved {
+        ResolvedSessionResource::Url(url) => {
+            open::that(&url).map_err(|error| format!("failed to open URL {url}: {error}"))
+        }
+        ResolvedSessionResource::Path(path) => {
+            if !path.exists() {
+                return Err(format!("local resource does not exist: {}", path.display()));
+            }
+            open::that(&path).map_err(|error| format!("failed to open {}: {error}", path.display()))
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn reveal_session_source(agent: String, source_file_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let result = (|| {
+            // 产品入口只对独立文件型会话开放，避免把 OpenCode 的共享数据库误当成单个会话文件。
+            let exposed_path = session::session_source_file_path(&agent, &source_file_path)
+                .ok_or_else(|| {
+                    format!("agent {agent} does not expose an independent session file")
+                })?;
+            let source_file = validate_session_source_file(&exposed_path)?;
+            reveal_file_in_manager(&source_file)
+        })();
+
+        result.map_err(|error| {
+            log::warn!(
+                "[sessions] source file reveal failed agent={} source={}: {}",
+                agent,
+                source_file_path,
+                error
+            );
+            error
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn validate_session_source_file(path: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("session file does not exist {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("session source is not a file: {}", path.display()));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn reveal_file_in_manager(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("failed to launch Finder: {error}"))?;
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("failed to launch Explorer: {error}"))?;
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let status = {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("session file has no parent directory: {}", path.display()))?;
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .status()
+            .map_err(|error| format!("failed to launch file manager: {error}"))?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "file manager exited with status {status} for {}",
+            path.display()
+        ))
+    }
+}
+
+fn resolve_session_resource_target(
+    target: &str,
+    project_dir: Option<&str>,
+) -> Result<ResolvedSessionResource, String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err("session resource target is empty".into());
+    }
+
+    if is_windows_absolute_path(trimmed) {
+        return Ok(ResolvedSessionResource::Path(PathBuf::from(trimmed)));
+    }
+
+    if let Ok(url) = url::Url::parse(trimmed) {
+        return match url.scheme() {
+            "http" | "https" => Ok(ResolvedSessionResource::Url(url.to_string())),
+            "file" => url
+                .to_file_path()
+                .map(ResolvedSessionResource::Path)
+                .map_err(|_| format!("invalid local file URL: {trimmed}")),
+            scheme => Err(format!("unsupported session resource protocol: {scheme}")),
+        };
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Ok(ResolvedSessionResource::Path(path.to_path_buf()));
+    }
+
+    let project_dir = project_dir
+        .filter(|directory| !directory.trim().is_empty())
+        .ok_or_else(|| format!("relative resource has no project directory: {trimmed}"))?;
+    let base_url = url::Url::from_directory_path(project_dir)
+        .map_err(|_| format!("invalid project directory: {project_dir}"))?;
+    let resolved_url = base_url
+        .join(trimmed)
+        .map_err(|error| format!("failed to resolve relative resource {trimmed}: {error}"))?;
+    let resolved_path = resolved_url
+        .to_file_path()
+        .map_err(|_| format!("failed to convert relative resource to local path: {trimmed}"))?;
+    Ok(ResolvedSessionResource::Path(resolved_path))
+}
+
+fn is_windows_absolute_path(target: &str) -> bool {
+    let bytes = target.as_bytes();
+    let has_drive_prefix = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    has_drive_prefix || target.starts_with(r"\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn session_source_locator_accepts_only_existing_files() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(&source, "{}\n").expect("write session");
+
+        assert_eq!(
+            validate_session_source_file(&source).expect("valid source"),
+            source
+        );
+        assert!(validate_session_source_file(temp.path()).is_err());
+        assert!(validate_session_source_file(&temp.path().join("missing.jsonl")).is_err());
+    }
+
+    #[test]
+    fn session_resource_keeps_web_urls_external() {
+        assert_eq!(
+            resolve_session_resource_target("https://example.com/docs?q=1", Some("/tmp/project"))
+                .expect("target"),
+            ResolvedSessionResource::Url("https://example.com/docs?q=1".into())
+        );
+    }
+
+    #[test]
+    fn session_resource_resolves_relative_paths_from_project_directory() {
+        assert_eq!(
+            resolve_session_resource_target("docs/result.html", Some("/tmp/project"))
+                .expect("target"),
+            ResolvedSessionResource::Path(PathBuf::from("/tmp/project/docs/result.html"))
+        );
+    }
+
+    #[test]
+    fn session_resource_accepts_absolute_and_file_url_paths() {
+        assert_eq!(
+            resolve_session_resource_target("/tmp/output.png", None).expect("absolute"),
+            ResolvedSessionResource::Path(PathBuf::from("/tmp/output.png"))
+        );
+        assert_eq!(
+            resolve_session_resource_target("file:///tmp/output%20image.png", None)
+                .expect("file url"),
+            ResolvedSessionResource::Path(PathBuf::from("/tmp/output image.png"))
+        );
+    }
+
+    #[test]
+    fn session_resource_accepts_windows_absolute_paths_before_url_parsing() {
+        assert_eq!(
+            resolve_session_resource_target(r"C:\Users\demo\output.png", None)
+                .expect("windows drive path"),
+            ResolvedSessionResource::Path(PathBuf::from(r"C:\Users\demo\output.png"))
+        );
+        assert_eq!(
+            resolve_session_resource_target(r"\\server\share\output.png", None)
+                .expect("windows UNC path"),
+            ResolvedSessionResource::Path(PathBuf::from(r"\\server\share\output.png"))
+        );
+    }
+
+    #[test]
+    fn session_resource_rejects_unsafe_protocols_and_unresolved_relative_paths() {
+        assert!(resolve_session_resource_target("javascript:alert(1)", Some("/tmp")).is_err());
+        assert!(resolve_session_resource_target("data:text/plain,hello", Some("/tmp")).is_err());
+        assert!(resolve_session_resource_target("docs/result.html", None).is_err());
+    }
 }

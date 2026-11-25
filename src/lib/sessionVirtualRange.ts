@@ -19,6 +19,10 @@ export interface VirtualRangeResult {
 }
 
 export interface StableVirtualItem {
+  id: string;
+  category: string;
+  importance: string;
+  title: string;
   role: string;
   timestamp: number | null;
   content: string;
@@ -151,6 +155,10 @@ function virtualItemsShareMeasuredHeight(
   return (
     previousItem !== undefined &&
     nextItem !== undefined &&
+    previousItem.id === nextItem.id &&
+    previousItem.category === nextItem.category &&
+    previousItem.importance === nextItem.importance &&
+    previousItem.title === nextItem.title &&
     previousItem.role === nextItem.role &&
     previousItem.timestamp === nextItem.timestamp &&
     previousItem.content === nextItem.content

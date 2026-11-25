@@ -4,7 +4,11 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
 use super::{
-    compact_raw_value, SessionMessage, SessionMeta, SessionRawRecord, SessionSourceRevision,
+    assemble_session_timeline, compact_raw_value, represent_timeline_entry,
+    summarize_timeline_text, summarize_timeline_value, timeline_section_priority, SessionMessage,
+    SessionMeta, SessionRawRecord, SessionRawReference, SessionSourceRevision, SessionTimeline,
+    SessionTimelineCategory, SessionTimelineEntry, SessionTimelineImportance, SessionTokenUsage,
+    TimelineRecordSemantics, TimelineUsageSample,
 };
 
 /// OpenCode 数据库候选路径。
@@ -117,6 +121,7 @@ fn scan_db_sessions(db_path: &PathBuf) -> Vec<SessionMeta> {
 
         sessions.push(SessionMeta {
             agent: "opencode".into(),
+            source: None,
             resume_command: Some(format!("opencode -s {session_id}")),
             session_id: session_id.clone(),
             title: truncate(&final_title, 80),
@@ -127,6 +132,7 @@ fn scan_db_sessions(db_path: &PathBuf) -> Vec<SessionMeta> {
             },
             last_active_at: Some(updated),
             source_path: format!("sqlite:{db_display}:{session_id}"),
+            source_file_path: None,
         });
     }
 
@@ -234,18 +240,21 @@ pub fn source_revision(source_path: &str) -> Result<SessionSourceRevision, Strin
 
 /// 导出 OpenCode 会话在 SQLite 中的原始表结构。
 pub fn load_raw_records(source_path: &str) -> Result<Vec<SessionRawRecord>, String> {
-    let (db_path, session_id) = parse_sqlite_source(source_path)
-        .ok_or_else(|| format!("invalid opencode source path: {source_path}"))?;
+    Ok(load_raw_records_exact(source_path)?
+        .into_iter()
+        .map(|record| SessionRawRecord {
+            value: compact_raw_value(record.value),
+            ..record
+        })
+        .collect())
+}
 
-    let conn = Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("failed to open opencode db: {e}"))?;
+pub(crate) fn load_raw_records_exact(source_path: &str) -> Result<Vec<SessionRawRecord>, String> {
+    let (conn, session_id) = open_session_reader(source_path)?;
 
     let mut records = Vec::new();
 
-    if let Some(session) = load_raw_session_row(&conn, &session_id)? {
+    if let Some(session) = load_raw_session_row_exact(&conn, &session_id)? {
         records.push(SessionRawRecord {
             section: "session".into(),
             index: 1,
@@ -253,13 +262,34 @@ pub fn load_raw_records(source_path: &str) -> Result<Vec<SessionRawRecord>, Stri
         });
     }
 
-    records.extend(load_raw_message_rows(&conn, &session_id)?);
-    records.extend(load_raw_part_rows(&conn, &session_id)?);
+    records.extend(load_raw_message_rows_exact(&conn, &session_id)?);
+    records.extend(load_raw_part_rows_exact(&conn, &session_id)?);
 
     Ok(records)
 }
 
-fn load_raw_session_row(conn: &Connection, session_id: &str) -> Result<Option<Value>, String> {
+pub(super) fn load_raw_session_message_rows(
+    source_path: &str,
+) -> Result<Vec<SessionRawRecord>, String> {
+    let (conn, session_id) = open_session_reader(source_path)?;
+    load_raw_message_rows_exact(&conn, &session_id)
+}
+
+fn open_session_reader(source_path: &str) -> Result<(Connection, String), String> {
+    let (db_path, session_id) = parse_sqlite_source(source_path)
+        .ok_or_else(|| format!("invalid opencode source path: {source_path}"))?;
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("failed to open opencode db: {error}"))?;
+    Ok((conn, session_id))
+}
+
+fn load_raw_session_row_exact(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<Value>, String> {
     let row = conn
         .query_row(
             "SELECT id, title, directory, time_created, time_updated FROM session WHERE id = ?1",
@@ -282,10 +312,10 @@ fn load_raw_session_row(conn: &Connection, session_id: &str) -> Result<Option<Va
         .optional()
         .map_err(|e| format!("failed to query session row: {e}"))?;
 
-    Ok(row.map(compact_raw_value))
+    Ok(row)
 }
 
-fn load_raw_message_rows(
+fn load_raw_message_rows_exact(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<SessionRawRecord>, String> {
@@ -305,7 +335,7 @@ fn load_raw_message_rows(
                 "id": id,
                 "session_id": session_id,
                 "time_created": time_created,
-                "data": parse_json_text_as_raw_value(&data),
+                "data": parse_json_text_as_raw_value_exact(&data),
             }))
         })
         .map_err(|e| format!("failed to query raw messages: {e}"))?;
@@ -322,7 +352,7 @@ fn load_raw_message_rows(
     Ok(records)
 }
 
-fn load_raw_part_rows(
+fn load_raw_part_rows_exact(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<SessionRawRecord>, String> {
@@ -344,7 +374,7 @@ fn load_raw_part_rows(
                 "session_id": session_id,
                 "message_id": message_id,
                 "time_created": time_created,
-                "data": parse_json_text_as_raw_value(&data),
+                "data": parse_json_text_as_raw_value_exact(&data),
             }))
         })
         .map_err(|e| format!("failed to query raw parts: {e}"))?;
@@ -361,13 +391,376 @@ fn load_raw_part_rows(
     Ok(records)
 }
 
-fn parse_json_text_as_raw_value(text: &str) -> Value {
+fn parse_json_text_as_raw_value_exact(text: &str) -> Value {
     match serde_json::from_str::<Value>(text) {
-        Ok(value) => compact_raw_value(value),
+        Ok(value) => value,
         Err(err) => serde_json::json!({
             "_parse_error": err.to_string(),
-            "raw": compact_raw_value(Value::String(text.to_string())),
+            "raw": text,
         }),
+    }
+}
+
+pub(crate) fn load_timeline_entries(source_path: &str) -> Result<SessionTimeline, String> {
+    let records = load_raw_records_exact(source_path)?;
+    let message_roles: std::collections::HashMap<String, String> = records
+        .iter()
+        .filter(|record| record.section == "message")
+        .filter_map(|record| {
+            let message_id = record.value.get("id")?.as_str()?.to_string();
+            let role = record.value.get("data")?.get("role")?.as_str()?.to_string();
+            Some((message_id, role))
+        })
+        .collect();
+
+    let mut adapted_records: Vec<(SessionTimelineEntry, TimelineRecordSemantics)> = records
+        .iter()
+        .map(|record| {
+            let message_role = record
+                .value
+                .get("message_id")
+                .and_then(Value::as_str)
+                .and_then(|message_id| message_roles.get(message_id))
+                .map(String::as_str);
+            (
+                represent_timeline_record(record, message_role),
+                interpret_timeline_record(record),
+            )
+        })
+        .collect();
+
+    adapted_records.sort_by(|left, right| {
+        left.0
+            .timestamp
+            .cmp(&right.0.timestamp)
+            .then_with(|| {
+                timeline_section_priority(&left.0.raw_reference.section)
+                    .cmp(&timeline_section_priority(&right.0.raw_reference.section))
+            })
+            .then_with(|| left.0.raw_reference.index.cmp(&right.0.raw_reference.index))
+    });
+    let (entries, semantics) = adapted_records.into_iter().unzip();
+    Ok(assemble_session_timeline(entries, semantics))
+}
+
+pub(crate) fn load_raw_record_exact(
+    source_path: &str,
+    reference: &SessionRawReference,
+) -> Result<Value, String> {
+    let (db_path, session_id) = parse_sqlite_source(source_path)
+        .ok_or_else(|| format!("invalid opencode source path: {source_path}"))?;
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("failed to open opencode db: {error}"))?;
+    let record_id = reference.record_id.as_deref().ok_or_else(|| {
+        format!(
+            "raw OpenCode reference has no stable id section={} index={}",
+            reference.section, reference.index
+        )
+    })?;
+
+    let value = match reference.section.as_str() {
+        "session" if record_id == session_id => load_raw_session_row_exact(&conn, &session_id)?,
+        "message" => load_raw_message_row_exact(&conn, &session_id, record_id)?,
+        "part" => load_raw_part_row_exact(&conn, &session_id, record_id)?,
+        section => return Err(format!("unknown OpenCode raw section: {section}")),
+    };
+
+    value.ok_or_else(|| {
+        format!(
+            "raw OpenCode record not found section={} index={} id={record_id}",
+            reference.section, reference.index
+        )
+    })
+}
+
+fn load_raw_message_row_exact(
+    conn: &Connection,
+    session_id: &str,
+    record_id: &str,
+) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT id, session_id, time_created, data FROM message WHERE session_id = ?1 AND id = ?2",
+        [session_id, record_id],
+        |row| {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let data: String = row.get(3)?;
+            Ok(serde_json::json!({
+                "id": id,
+                "session_id": session_id,
+                "time_created": time_created,
+                "data": parse_json_text_as_raw_value_exact(&data),
+            }))
+        },
+    )
+    .optional()
+    .map_err(|error| format!("failed to query raw message {record_id}: {error}"))
+}
+
+fn load_raw_part_row_exact(
+    conn: &Connection,
+    session_id: &str,
+    record_id: &str,
+) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT id, session_id, message_id, time_created, data FROM part WHERE session_id = ?1 AND id = ?2",
+        [session_id, record_id],
+        |row| {
+            let id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let message_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok(serde_json::json!({
+                "id": id,
+                "session_id": session_id,
+                "message_id": message_id,
+                "time_created": time_created,
+                "data": parse_json_text_as_raw_value_exact(&data),
+            }))
+        },
+    )
+    .optional()
+    .map_err(|error| format!("failed to query raw part {record_id}: {error}"))
+}
+
+fn represent_timeline_record(
+    record: &SessionRawRecord,
+    message_role: Option<&str>,
+) -> SessionTimelineEntry {
+    let timestamp = record
+        .value
+        .get("time_created")
+        .or_else(|| record.value.get("time_updated"))
+        .and_then(Value::as_i64);
+    let preview = match record.section.as_str() {
+        "session" => OpenCodeTimelinePreview {
+            category: SessionTimelineCategory::Metadata,
+            importance: SessionTimelineImportance::Debug,
+            title: "Session Metadata".into(),
+            role: "system".into(),
+            content: summarize_timeline_value(&record.value, 900),
+        },
+        "message" => represent_opencode_message_record(record),
+        "part" => represent_opencode_part_record(record, message_role),
+        _ => OpenCodeTimelinePreview {
+            category: SessionTimelineCategory::Unknown,
+            importance: SessionTimelineImportance::Debug,
+            title: format!("Unknown · {}", record.section),
+            role: "system".into(),
+            content: summarize_timeline_value(&record.value, 900),
+        },
+    };
+
+    represent_timeline_entry(
+        record,
+        preview.category,
+        preview.importance,
+        preview.title,
+        preview.role,
+        preview.content,
+        timestamp,
+    )
+}
+
+fn interpret_timeline_record(record: &SessionRawRecord) -> TimelineRecordSemantics {
+    if record.section != "message" {
+        return TimelineRecordSemantics::default();
+    }
+
+    let data = record.value.get("data").unwrap_or(&record.value);
+    let role = data.get("role").and_then(Value::as_str);
+    let starts_turn = role == Some("user");
+    let completed_at = data
+        .get("time")
+        .and_then(|time| time.get("completed"))
+        .and_then(Value::as_i64);
+    let finish = data.get("finish").and_then(Value::as_str);
+    let has_error = data.get("error").is_some_and(|error| !error.is_null());
+    let completes_turn = role == Some("assistant")
+        && completed_at.is_some()
+        && (has_error || finish.is_some_and(|finish| finish != "tool-calls"));
+    let usage_sample = (role == Some("assistant"))
+        .then(|| data.get("tokens"))
+        .flatten()
+        .map(|tokens| TimelineUsageSample {
+            deduplication_key: record
+                .value
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| format!("opencode-message-{id}"))
+                .unwrap_or_else(|| format!("opencode-record-{}", record.index)),
+            usage: SessionTokenUsage {
+                total_tokens: tokens.get("total").and_then(token_count),
+                input_tokens: tokens.get("input").and_then(token_count),
+                output_tokens: opencode_output_tokens_with_reasoning(tokens),
+                thinking_tokens: tokens.get("reasoning").and_then(token_count),
+                cache_read_tokens: tokens
+                    .get("cache")
+                    .and_then(|cache| cache.get("read"))
+                    .and_then(token_count),
+                cache_write_tokens: tokens
+                    .get("cache")
+                    .and_then(|cache| cache.get("write"))
+                    .and_then(token_count),
+                // OpenCode 不区分缓存写入的存活时长
+                cache_write_1h_tokens: None,
+                cache_write_5m_tokens: None,
+            },
+        });
+
+    TimelineRecordSemantics {
+        starts_turn,
+        completes_turn,
+        usage_sample,
+    }
+}
+
+/// OpenCode 把思考产出单独计在 reasoning 里，合并后才与统一口径一致
+fn opencode_output_tokens_with_reasoning(tokens: &Value) -> Option<u64> {
+    let text_output = tokens.get("output").and_then(token_count)?;
+    let reasoning_output = tokens.get("reasoning").and_then(token_count).unwrap_or(0);
+    Some(text_output.saturating_add(reasoning_output))
+}
+
+fn token_count(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|count| u64::try_from(count).ok()))
+}
+
+struct OpenCodeTimelinePreview {
+    category: SessionTimelineCategory,
+    importance: SessionTimelineImportance,
+    title: String,
+    role: String,
+    content: String,
+}
+
+fn represent_opencode_message_record(record: &SessionRawRecord) -> OpenCodeTimelinePreview {
+    let data = record.value.get("data").unwrap_or(&record.value);
+    let role = data
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    OpenCodeTimelinePreview {
+        category: SessionTimelineCategory::Metadata,
+        importance: SessionTimelineImportance::Debug,
+        title: format!("Message Metadata · {role}"),
+        role: "system".into(),
+        content: summarize_timeline_value(data, 700),
+    }
+}
+
+fn represent_opencode_part_record(
+    record: &SessionRawRecord,
+    message_role: Option<&str>,
+) -> OpenCodeTimelinePreview {
+    let data = record.value.get("data").unwrap_or(&record.value);
+    let part_type = data
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match part_type {
+        "text" => {
+            let role = message_role.unwrap_or("assistant");
+            let (category, title, display_role) = if role == "user" {
+                (SessionTimelineCategory::User, "User Text", "user")
+            } else {
+                (
+                    SessionTimelineCategory::Assistant,
+                    "Assistant Text",
+                    "assistant",
+                )
+            };
+            OpenCodeTimelinePreview {
+                category,
+                importance: SessionTimelineImportance::Primary,
+                title: title.into(),
+                role: display_role.into(),
+                content: data
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("[空文本块]")
+                    .to_string(),
+            }
+        }
+        "reasoning" => OpenCodeTimelinePreview {
+            category: SessionTimelineCategory::Reasoning,
+            importance: SessionTimelineImportance::Detail,
+            title: "Reasoning".into(),
+            role: "assistant".into(),
+            content: data
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("[空 reasoning 块]")
+                .to_string(),
+        },
+        "tool" => represent_opencode_tool(data),
+        "file" => OpenCodeTimelinePreview {
+            category: SessionTimelineCategory::Event,
+            importance: SessionTimelineImportance::Primary,
+            title: "File".into(),
+            role: message_role.unwrap_or("assistant").into(),
+            content: summarize_timeline_value(data, 900),
+        },
+        "patch" | "retry" | "agent" | "subtask" => OpenCodeTimelinePreview {
+            category: SessionTimelineCategory::Event,
+            importance: SessionTimelineImportance::Detail,
+            title: format!("Part · {part_type}"),
+            role: "system".into(),
+            content: summarize_timeline_value(data, 900),
+        },
+        _ => OpenCodeTimelinePreview {
+            category: SessionTimelineCategory::Event,
+            importance: SessionTimelineImportance::Debug,
+            title: format!("Part · {part_type}"),
+            role: "system".into(),
+            content: summarize_timeline_value(data, 900),
+        },
+    }
+}
+
+fn represent_opencode_tool(data: &Value) -> OpenCodeTimelinePreview {
+    let tool = data
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let state = data.get("state");
+    let status = state
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut sections = vec![format!("工具: {tool}"), format!("状态: {status}")];
+
+    if let Some(input) = state.and_then(|value| value.get("input")) {
+        sections.push(format!("输入:\n{}", summarize_timeline_value(input, 900)));
+    }
+    if let Some(output) = state
+        .and_then(|value| value.get("output"))
+        .and_then(Value::as_str)
+        .filter(|output| !output.trim().is_empty())
+    {
+        sections.push(format!("结果:\n{}", summarize_timeline_text(output, 1_200)));
+    }
+    if let Some(exit) = state
+        .and_then(|value| value.get("metadata"))
+        .and_then(|value| value.get("exit"))
+        .and_then(Value::as_i64)
+    {
+        sections.push(format!("退出码: {exit}"));
+    }
+
+    OpenCodeTimelinePreview {
+        category: SessionTimelineCategory::ToolCall,
+        importance: SessionTimelineImportance::Detail,
+        title: format!("Tool · {tool}"),
+        role: "tool".into(),
+        content: sections.join("\n"),
     }
 }
 
@@ -522,8 +915,31 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionTurnStatus;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
+
+    #[test]
+    fn failed_opencode_tools_stay_collapsed_and_message_metadata_stays_debug() {
+        let tool = represent_opencode_tool(&serde_json::json!({
+            "type": "tool",
+            "tool": "bash",
+            "state": {"status": "failed", "output": "permission denied"},
+        }));
+        let message = SessionRawRecord {
+            section: "message".into(),
+            index: 1,
+            value: serde_json::json!({
+                "data": {"role": "assistant", "error": {"message": "model unavailable"}},
+            }),
+        };
+
+        assert_eq!(tool.importance, SessionTimelineImportance::Detail);
+        assert_eq!(
+            represent_opencode_message_record(&message).importance,
+            SessionTimelineImportance::Debug
+        );
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -628,6 +1044,7 @@ mod tests {
         // time_updated DESC
         assert_eq!(sessions[0].session_id, "ses_2");
         assert_eq!(sessions[0].title, "Named");
+        assert_eq!(sessions[0].source_file_path, None);
         assert_eq!(sessions[1].session_id, "ses_1");
         // 空 title fallback 到 directory basename
         assert_eq!(sessions[1].title, "proj-a");
@@ -713,6 +1130,179 @@ mod tests {
         assert!(msgs[1].content.contains("Output:\nok"));
         assert_eq!(msgs[2].role, "assistant");
         assert_eq!(msgs[2].content, "Done");
+    }
+
+    #[test]
+    fn timeline_keeps_every_opencode_row_and_reveals_exact_tool_record() {
+        let temp = tempdir().expect("tempdir");
+        let db = temp.path().join("opencode.db");
+        let conn = Connection::open(&db).expect("open");
+        create_schema(&conn);
+        conn.execute(
+            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5)",
+            ("ses_1", "S", "/tmp/p", 1000_i64, 4000_i64),
+        )
+        .expect("insert session");
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            (
+                "msg_1",
+                "ses_1",
+                2000_i64,
+                r#"{"role":"assistant","modelID":"test"}"#,
+            ),
+        )
+        .expect("insert message");
+        conn.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                "prt_text",
+                "ses_1",
+                "msg_1",
+                2100_i64,
+                r#"{"type":"text","text":"完成"}"#,
+            ),
+        )
+        .expect("insert text part");
+        let long_output = "x".repeat(1_400);
+        conn.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                "prt_tool",
+                "ses_1",
+                "msg_1",
+                2200_i64,
+                serde_json::json!({
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": {"command": "pnpm test"},
+                        "output": long_output,
+                        "metadata": {"exit": 0},
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .expect("insert tool part");
+        conn.execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                "prt_unknown",
+                "ses_1",
+                "msg_1",
+                2300_i64,
+                r#"{"type":"future_part","payload":{"kept":true}}"#,
+            ),
+        )
+        .expect("insert unknown part");
+        drop(conn);
+
+        let source = format!("sqlite:{}:ses_1", db.display());
+        let entries = load_timeline_entries(&source).expect("timeline");
+
+        assert_eq!(entries.len(), 5);
+        assert!(entries.iter().any(|entry| {
+            entry.category == SessionTimelineCategory::Assistant
+                && entry.importance == SessionTimelineImportance::Primary
+                && entry.content == "完成"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.category == SessionTimelineCategory::Event
+                && entry.importance == SessionTimelineImportance::Debug
+                && entry.title == "Part · future_part"
+                && entry.content.contains("kept")
+        }));
+        let tool_entry = entries
+            .iter()
+            .find(|entry| entry.category == SessionTimelineCategory::ToolCall)
+            .expect("tool entry");
+        assert_eq!(tool_entry.importance, SessionTimelineImportance::Detail);
+        assert!(tool_entry.content.contains("pnpm test"));
+        assert!(tool_entry.content.contains("退出码: 0"));
+        assert!(tool_entry.content.len() < 1_400);
+
+        let raw = load_raw_record_exact(&source, &tool_entry.raw_reference).expect("tool raw");
+        assert_eq!(
+            raw["data"]["state"]["output"]
+                .as_str()
+                .expect("output")
+                .len(),
+            1_400
+        );
+    }
+
+    #[test]
+    fn timeline_aggregates_opencode_assistant_usage_after_terminal_finish() {
+        let temp = tempdir().expect("tempdir");
+        let db = temp.path().join("opencode-usage.db");
+        let conn = Connection::open(&db).expect("open");
+        create_schema(&conn);
+        conn.execute(
+            "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5)",
+            ("ses_usage", "Usage", "/tmp/p", 1000_i64, 5000_i64),
+        )
+        .expect("insert session");
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            ("msg_user", "ses_usage", 2000_i64, r#"{"role":"user"}"#),
+        )
+        .expect("insert user");
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            (
+                "msg_tool",
+                "ses_usage",
+                3000_i64,
+                r#"{"role":"assistant","finish":"tool-calls","time":{"created":3000,"completed":3100},"tokens":{"total":100,"input":20,"output":10,"reasoning":4,"cache":{"read":70,"write":0}}}"#,
+            ),
+        )
+        .expect("insert tool call");
+        conn.execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            (
+                "msg_final",
+                "ses_usage",
+                4000_i64,
+                r#"{"role":"assistant","time":{"created":4000},"tokens":{"total":50,"input":15,"output":5,"reasoning":1,"cache":{"read":25,"write":5}}}"#,
+            ),
+        )
+        .expect("insert running final");
+        drop(conn);
+
+        let source = format!("sqlite:{}:ses_usage", db.display());
+        let running = load_timeline_entries(&source).expect("running timeline");
+        assert_eq!(running.blocks[1].status, Some(SessionTurnStatus::Running));
+        assert_eq!(running.blocks[1].usage, None);
+
+        let conn = Connection::open(&db).expect("reopen");
+        conn.execute(
+            "UPDATE message SET data = ?1 WHERE id = 'msg_final'",
+            [r#"{"role":"assistant","finish":"stop","time":{"created":4000,"completed":4100},"tokens":{"total":50,"input":15,"output":5,"reasoning":1,"cache":{"read":25,"write":5}}}"#],
+        )
+        .expect("complete final");
+        drop(conn);
+
+        let completed = load_timeline_entries(&source).expect("completed timeline");
+        assert_eq!(
+            completed.blocks[1].status,
+            Some(SessionTurnStatus::Completed)
+        );
+        assert_eq!(
+            completed.blocks[1].usage,
+            Some(SessionTokenUsage {
+                total_tokens: Some(150),
+                input_tokens: Some(35),
+                // OpenCode 把 4 和 1 的思考产出单列在 reasoning 里，统一口径并入 output
+                output_tokens: Some(20),
+                thinking_tokens: Some(5),
+                cache_read_tokens: Some(95),
+                cache_write_tokens: Some(5),
+                cache_write_1h_tokens: None,
+                cache_write_5m_tokens: None,
+            })
+        );
     }
 
     #[test]

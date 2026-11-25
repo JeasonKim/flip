@@ -7,9 +7,12 @@ import type {
   QuotaResult,
   ModelInfo,
   SessionMeta,
-  SessionMessage,
+  SessionPrompt,
+  SessionTimeline,
+  SessionRawReference,
   SessionSourceRevision,
-  SessionRawContent,
+  SessionSource,
+  SessionSourceConfig,
 } from "../types/profile";
 
 export async function listProfiles(): Promise<FlipConfig> {
@@ -68,22 +71,68 @@ export async function scanSessions(
   agentFilter?: SessionAgentId,
   offset = 0,
   limit = 20,
+  sourceFilter?: string,
 ): Promise<SessionMeta[]> {
   return invoke<SessionMeta[]>("scan_sessions", {
     agentFilter: agentFilter ?? null,
+    sourceFilter: sourceFilter ?? null,
     offset,
     limit,
   });
 }
 
-export async function loadSessionMessages(
+export async function listSessionSources(): Promise<SessionSource[]> {
+  return invoke<SessionSource[]>("list_session_sources");
+}
+
+export async function configureSessionSources(sources: SessionSourceConfig[]): Promise<SessionSource[]> {
+  return invoke<SessionSource[]>("configure_session_sources", { sources });
+}
+
+export async function loadSessionTimeline(
   agent: string,
   sourcePath: string,
-): Promise<SessionMessage[]> {
-  return invoke<SessionMessage[]>("load_session_messages", {
+): Promise<SessionTimeline> {
+  return invoke<SessionTimeline>("load_session_timeline", {
     agent,
     sourcePath,
   });
+}
+
+export function loadSessionSystemPrompts(
+  agent: string,
+  sourcePath: string,
+): Promise<SessionPrompt[]> {
+  return invoke("load_session_system_prompts", { agent, sourcePath });
+}
+
+export async function loadSessionEntryRaw(
+  agent: string,
+  sourcePath: string,
+  rawReference: SessionRawReference,
+): Promise<unknown> {
+  return invoke<unknown>("load_session_entry_raw", {
+    agent,
+    sourcePath,
+    rawReference,
+  });
+}
+
+export async function openSessionResource(
+  target: string,
+  projectDir?: string,
+): Promise<void> {
+  return invoke("open_session_resource", {
+    target,
+    projectDir: projectDir ?? null,
+  });
+}
+
+export async function revealSessionSource(
+  agent: string,
+  sourceFilePath: string,
+): Promise<void> {
+  return invoke("reveal_session_source", { agent, sourceFilePath });
 }
 
 export async function readSessionSourceRevision(
@@ -91,16 +140,6 @@ export async function readSessionSourceRevision(
   sourcePath: string,
 ): Promise<SessionSourceRevision> {
   return invoke<SessionSourceRevision>("read_session_source_revision", {
-    agent,
-    sourcePath,
-  });
-}
-
-export async function loadSessionRawContent(
-  agent: string,
-  sourcePath: string,
-): Promise<SessionRawContent> {
-  return invoke<SessionRawContent>("load_session_raw_content", {
     agent,
     sourcePath,
   });

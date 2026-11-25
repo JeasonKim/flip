@@ -1,8 +1,15 @@
 use std::fs;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use super::{SessionMessage, SessionMeta};
+use super::{
+    extract_content_text,
+    describe_embedded_data, represent_timeline_entry, summarize_timeline_text,
+    summarize_timeline_value, SessionMessage, SessionMeta, SessionRawRecord,
+    SessionTimelineCategory, SessionTimelineEntry, SessionTimelineImportance, SessionTokenUsage,
+    TimelineRecordSemantics, TimelineUsageSample,
+};
 
 fn sessions_dirs() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
@@ -13,34 +20,93 @@ fn sessions_dirs() -> Vec<PathBuf> {
 }
 
 /// 扫描所有 Codex 会话文件的元数据
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let mut sessions = Vec::new();
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, String> {
+    Ok(scan_source_sessions(&super::sources::configured_sources()?))
+}
 
-    for dir in sessions_dirs() {
-        if !dir.exists() {
-            continue;
+fn scan_source_sessions(sources: &[super::sources::SessionSource]) -> Vec<SessionMeta> {
+    let mut sessions = Vec::new();
+    let mut visited = HashSet::new();
+    for source in sources.iter().filter(|source| source.config.enabled) {
+        let start = sessions.len();
+        for name in ["sessions", "archived_sessions"] {
+            let dir = PathBuf::from(&source.config.path).join(name);
+            if dir.exists() {
+                collect_jsonl_files(&dir, &mut sessions, &mut visited, 0);
+            }
         }
-        collect_jsonl_files(&dir, &mut sessions, 0);
+        // 来源信息在文件缓存之外附加，标签改名即时生效。
+        for session in &mut sessions[start..] {
+            session.source = Some(super::sources::SessionSourceRef {
+                id: source.config.id.clone(),
+                label: source.config.label.clone(),
+            });
+            if !source.is_default {
+                session.resume_command = Some(codex_resume_command(
+                    &source.config.path,
+                    &session.session_id,
+                ));
+            }
+        }
     }
 
     sessions
 }
 
+fn codex_resume_command(home: &str, session_id: &str) -> String {
+    #[cfg(target_os = "windows")]
+    return windows_codex_resume_command(home, session_id);
+    #[cfg(not(target_os = "windows"))]
+    format!(
+        "env CODEX_HOME={} codex resume {}",
+        super::shell_quote_posix(home),
+        super::shell_quote_posix(session_id)
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_codex_resume_command(home: &str, session_id: &str) -> String {
+    use base64::Engine;
+    let script = format!(
+        "$env:CODEX_HOME = {}; & codex resume {}",
+        super::powershell_quote(home),
+        super::powershell_quote(session_id)
+    );
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!(
+        "powershell -NoProfile -EncodedCommand {}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 /// 递归扫描目录下的 .jsonl 文件（sessions 使用 YYYY/MM/DD 三级目录）
-fn collect_jsonl_files(dir: &PathBuf, sessions: &mut Vec<SessionMeta>, depth: usize) {
+fn collect_jsonl_files(
+    dir: &PathBuf,
+    sessions: &mut Vec<SessionMeta>,
+    visited: &mut HashSet<PathBuf>,
+    depth: usize,
+) {
     const MAX_DEPTH: usize = 4;
     if depth > MAX_DEPTH {
         return;
     }
 
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!(
+                "[session-sources] scan failed path={}: {}",
+                dir.display(),
+                error
+            );
+            return;
+        }
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl_files(&path, sessions, depth + 1);
+            collect_jsonl_files(&path, sessions, visited, depth + 1);
             continue;
         }
 
@@ -54,9 +120,14 @@ fn collect_jsonl_files(dir: &PathBuf, sessions: &mut Vec<SessionMeta>, depth: us
             continue;
         }
 
-        if let Some(meta) =
-            super::cached_file_session_meta("codex", &path, || extract_session_meta(&path, &fname))
-        {
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+
+        if let Some(meta) = super::cached_file_session_meta("codex", &canonical, || {
+            extract_session_meta(&canonical, &fname)
+        }) {
             sessions.push(meta);
         }
     }
@@ -125,9 +196,11 @@ fn extract_session_meta(path: &PathBuf, fname: &str) -> Option<SessionMeta> {
         resume_command: Some(format!("codex resume {}", session_id)),
         session_id,
         title: final_title,
+        source: None,
         project_dir,
         last_active_at: mtime,
         source_path: path.to_string_lossy().to_string(),
+        source_file_path: Some(path.to_string_lossy().to_string()),
     })
 }
 
@@ -273,6 +346,445 @@ pub fn parse_messages(source_path: &str) -> Result<Vec<SessionMessage>, String> 
     Ok(messages)
 }
 
+pub(crate) fn represent_timeline_record(record: &SessionRawRecord) -> SessionTimelineEntry {
+    let value = &record.value;
+    let timestamp = parse_timestamp(value);
+
+    if record.section == "jsonl_parse_error" {
+        return represent_timeline_entry(
+            record,
+            SessionTimelineCategory::Unknown,
+            SessionTimelineImportance::Debug,
+            "JSONL 解析失败".into(),
+            "system".into(),
+            summarize_timeline_value(value, 900),
+            timestamp,
+        );
+    }
+
+    let line_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let payload = value.get("payload").unwrap_or(value);
+    let payload_type = payload
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(line_type);
+    let preview = match line_type {
+        "response_item" => represent_codex_response_item(payload, payload_type),
+        "event_msg" => represent_codex_event(payload, payload_type),
+        "session_meta" | "turn_context" => CodexTimelinePreview {
+            category: SessionTimelineCategory::Metadata,
+            importance: SessionTimelineImportance::Debug,
+            title: line_type.into(),
+            role: "system".into(),
+            content: summarize_timeline_value(payload, 900),
+        },
+        "unknown" => CodexTimelinePreview {
+            category: SessionTimelineCategory::Unknown,
+            importance: SessionTimelineImportance::Debug,
+            title: "Unknown Record".into(),
+            role: "system".into(),
+            content: summarize_timeline_value(value, 900),
+        },
+        _ => CodexTimelinePreview {
+            category: SessionTimelineCategory::Event,
+            importance: SessionTimelineImportance::Debug,
+            title: line_type.into(),
+            role: "system".into(),
+            content: summarize_timeline_value(payload, 900),
+        },
+    };
+
+    represent_timeline_entry(
+        record,
+        preview.category,
+        preview.importance,
+        preview.title,
+        preview.role,
+        preview.content,
+        timestamp,
+    )
+}
+
+pub(crate) fn interpret_timeline_records(
+    records: &[SessionRawRecord],
+) -> Vec<TimelineRecordSemantics> {
+    let has_turn_context = records.iter().any(|record| {
+        record.value.get("type").and_then(serde_json::Value::as_str) == Some("turn_context")
+    });
+    let has_task_started = records
+        .iter()
+        .any(|record| codex_payload_type(&record.value) == "task_started");
+    let has_user_message = records
+        .iter()
+        .any(|record| codex_payload_type(&record.value) == "user_message");
+
+    records
+        .iter()
+        .map(|record| {
+            let line_type = record
+                .value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let payload = record.value.get("payload").unwrap_or(&record.value);
+            let payload_type = codex_payload_type(&record.value);
+            let starts_turn = if has_task_started {
+                payload_type == "task_started"
+            } else if has_user_message {
+                payload_type == "user_message"
+            } else if has_turn_context {
+                line_type == "turn_context"
+            } else {
+                line_type == "response_item"
+                    && payload_type == "message"
+                    && payload.get("role").and_then(serde_json::Value::as_str) == Some("user")
+            };
+            let completes_turn = payload_type == "task_complete";
+            let usage_sample = (payload_type == "token_count")
+                .then(|| payload.get("info"))
+                .flatten()
+                .and_then(|info| {
+                    let usage = info.get("last_token_usage")?;
+                    let deduplication_key = info
+                        .get("total_token_usage")
+                        .and_then(|total| serde_json::to_string(total).ok())
+                        .map(|total| format!("codex-total-{total}"))
+                        .unwrap_or_else(|| format!("codex-record-{}", record.index));
+                    Some(TimelineUsageSample {
+                        deduplication_key,
+                        usage: SessionTokenUsage {
+                            total_tokens: usage.get("total_tokens").and_then(token_count),
+                            input_tokens: codex_uncached_input_tokens(usage),
+                            output_tokens: usage.get("output_tokens").and_then(token_count),
+                            thinking_tokens: usage
+                                .get("reasoning_output_tokens")
+                                .and_then(token_count),
+                            cache_read_tokens: usage
+                                .get("cached_input_tokens")
+                                .and_then(token_count),
+                            cache_write_tokens: usage
+                                .get("cache_write_input_tokens")
+                                .and_then(token_count),
+                            // Codex 不区分缓存写入的存活时长
+                            cache_write_1h_tokens: None,
+                            cache_write_5m_tokens: None,
+                        },
+                    })
+                });
+
+            TimelineRecordSemantics {
+                starts_turn,
+                completes_turn,
+                usage_sample,
+            }
+        })
+        .collect()
+}
+
+fn codex_payload_type(value: &serde_json::Value) -> &str {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("type"))
+        .or_else(|| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+}
+
+/// Codex 上报的 input_tokens 把命中缓存的部分也算在内，扣除后才与统一口径一致
+fn codex_uncached_input_tokens(usage: &serde_json::Value) -> Option<u64> {
+    let reported_input = usage.get("input_tokens").and_then(token_count)?;
+    let cached_input = usage
+        .get("cached_input_tokens")
+        .and_then(token_count)
+        .unwrap_or(0);
+    Some(reported_input.saturating_sub(cached_input))
+}
+
+fn token_count(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|count| u64::try_from(count).ok()))
+}
+
+struct CodexTimelinePreview {
+    category: SessionTimelineCategory,
+    importance: SessionTimelineImportance,
+    title: String,
+    role: String,
+    content: String,
+}
+
+fn represent_codex_response_item(
+    payload: &serde_json::Value,
+    payload_type: &str,
+) -> CodexTimelinePreview {
+    match payload_type {
+        "message" => {
+            let role = payload
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let content = represent_codex_content(payload.get("content"));
+            let (category, importance, title, display_role) = match role {
+                "user" => (
+                    SessionTimelineCategory::User,
+                    SessionTimelineImportance::Primary,
+                    "User",
+                    "user",
+                ),
+                "assistant" => (
+                    SessionTimelineCategory::Assistant,
+                    SessionTimelineImportance::Primary,
+                    "Assistant",
+                    "assistant",
+                ),
+                "system" | "developer" => (
+                    SessionTimelineCategory::System,
+                    SessionTimelineImportance::Debug,
+                    "System",
+                    "system",
+                ),
+                _ => (
+                    SessionTimelineCategory::Unknown,
+                    SessionTimelineImportance::Debug,
+                    "Unknown Message",
+                    "system",
+                ),
+            };
+            CodexTimelinePreview {
+                category,
+                importance,
+                title: title.into(),
+                role: display_role.into(),
+                content,
+            }
+        }
+        "function_call" | "custom_tool_call" => {
+            let name = payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let arguments = payload
+                .get("arguments")
+                .or_else(|| payload.get("input"))
+                .map(represent_codex_tool_value)
+                .unwrap_or_else(|| "{}".into());
+            CodexTimelinePreview {
+                category: SessionTimelineCategory::ToolCall,
+                importance: SessionTimelineImportance::Detail,
+                title: format!("Tool · {name}"),
+                role: "tool".into(),
+                content: format!("工具: {name}\n输入:\n{arguments}"),
+            }
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let output = payload
+                .get("output")
+                .map(represent_codex_tool_value)
+                .unwrap_or_else(|| "[工具没有返回内容]".into());
+            CodexTimelinePreview {
+                category: SessionTimelineCategory::ToolResult,
+                importance: SessionTimelineImportance::Detail,
+                title: "Tool Result".into(),
+                role: "tool".into(),
+                content: format!("结果:\n{output}"),
+            }
+        }
+        "reasoning" => CodexTimelinePreview {
+            category: SessionTimelineCategory::Reasoning,
+            importance: SessionTimelineImportance::Detail,
+            title: "Reasoning".into(),
+            role: "assistant".into(),
+            content: represent_codex_reasoning(payload),
+        },
+        _ => CodexTimelinePreview {
+            category: SessionTimelineCategory::Event,
+            importance: SessionTimelineImportance::Debug,
+            title: format!("response_item · {payload_type}"),
+            role: "system".into(),
+            content: summarize_timeline_value(payload, 900),
+        },
+    }
+}
+
+fn represent_codex_event(payload: &serde_json::Value, payload_type: &str) -> CodexTimelinePreview {
+    match payload_type {
+        "agent_message" => CodexTimelinePreview {
+            category: SessionTimelineCategory::Assistant,
+            importance: SessionTimelineImportance::Primary,
+            title: "Assistant Event".into(),
+            role: "assistant".into(),
+            content: payload
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("[空消息]")
+                .to_string(),
+        },
+        "user_message" => CodexTimelinePreview {
+            category: SessionTimelineCategory::User,
+            importance: SessionTimelineImportance::Primary,
+            title: "User Event".into(),
+            role: "user".into(),
+            content: payload
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("[空消息]")
+                .to_string(),
+        },
+        "agent_reasoning" | "reasoning" => CodexTimelinePreview {
+            category: SessionTimelineCategory::Reasoning,
+            importance: SessionTimelineImportance::Detail,
+            title: "Reasoning Event".into(),
+            role: "assistant".into(),
+            content: payload
+                .get("text")
+                .or_else(|| payload.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| summarize_timeline_value(payload, 1_200)),
+        },
+        event if event.contains("tool") || event.contains("function") => CodexTimelinePreview {
+            category: SessionTimelineCategory::ToolResult,
+            importance: SessionTimelineImportance::Detail,
+            title: event.into(),
+            role: "tool".into(),
+            content: summarize_timeline_value(payload, 1_200),
+        },
+        event if is_actionable_codex_event(event) => CodexTimelinePreview {
+            category: SessionTimelineCategory::System,
+            importance: SessionTimelineImportance::Primary,
+            title: format!("event · {payload_type}"),
+            role: "system".into(),
+            content: summarize_timeline_value(payload, 1_200),
+        },
+        _ => CodexTimelinePreview {
+            category: SessionTimelineCategory::Event,
+            importance: SessionTimelineImportance::Debug,
+            title: format!("event · {payload_type}"),
+            role: "system".into(),
+            content: summarize_timeline_value(payload, 900),
+        },
+    }
+}
+
+fn is_actionable_codex_event(event: &str) -> bool {
+    let event = event.to_ascii_lowercase();
+    [
+        "warning",
+        "error",
+        "abort",
+        "request_user_input",
+        "approval_request",
+    ]
+    .iter()
+    .any(|marker| event.contains(marker))
+}
+
+/// Codex 的兼容事件流可能重复发送 response_item 中已经存在的用户/助手文本。
+/// 保留原始记录用于排障，但只让规范 response_item 作为默认可见正文。
+pub(crate) fn demote_duplicate_message_events(
+    records: &[SessionRawRecord],
+    entries: &mut [SessionTimelineEntry],
+) {
+    let response_messages: Vec<SessionTimelineEntry> = records
+        .iter()
+        .zip(entries.iter())
+        .filter(|(record, _)| {
+            record.value.get("type").and_then(serde_json::Value::as_str) == Some("response_item")
+                && codex_payload_type(&record.value) == "message"
+        })
+        .map(|(_, entry)| entry.clone())
+        .collect();
+
+    for (record, entry) in records.iter().zip(entries.iter_mut()) {
+        let is_compatibility_message = record.value.get("type").and_then(serde_json::Value::as_str)
+            == Some("event_msg")
+            && matches!(
+                codex_payload_type(&record.value),
+                "agent_message" | "user_message"
+            );
+        if !is_compatibility_message {
+            continue;
+        }
+
+        if response_messages.iter().any(|message| {
+            message.category == entry.category
+                && message.content == entry.content
+                && timestamps_are_equivalent(message.timestamp, entry.timestamp)
+        }) {
+            entry.importance = SessionTimelineImportance::Debug;
+        }
+    }
+}
+
+fn timestamps_are_equivalent(left: Option<i64>, right: Option<i64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => (left - right).abs() <= 1_000,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn represent_codex_content(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                if let Some(text) = item
+                    .get("text")
+                    .or_else(|| item.get("input_text"))
+                    .or_else(|| item.get("output_text"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    return text.to_string();
+                }
+
+                let item_type = item
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                if item_type.contains("image") {
+                    return describe_embedded_data(item)
+                        .unwrap_or_else(|| format!("[{item_type} 数据，点击“原始数据”查看]"));
+                }
+                format!("[{item_type}]\n{}", summarize_timeline_value(item, 700))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Some(other) => summarize_timeline_value(other, 1_200),
+        None => "[消息没有 content 字段]".into(),
+    }
+}
+
+fn represent_codex_reasoning(payload: &serde_json::Value) -> String {
+    for field in ["summary", "content"] {
+        if let Some(value) = payload.get(field) {
+            let content = represent_codex_content(Some(value));
+            if !content.trim().is_empty() {
+                return content;
+            }
+        }
+    }
+    summarize_timeline_value(payload, 1_200)
+}
+
+fn represent_codex_tool_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+                summarize_timeline_value(&parsed, 1_200)
+            } else {
+                summarize_timeline_text(text, 1_200)
+            }
+        }
+        other => summarize_timeline_value(other, 1_200),
+    }
+}
+
 fn append_codex_message(
     messages: &mut Vec<SessionMessage>,
     role: String,
@@ -311,37 +823,6 @@ fn is_duplicate_codex_message(
         (Some(left), Some(right)) => (left - right).abs() <= 1000,
         (None, None) => true,
         _ => false,
-    }
-}
-
-/// 从 content 字段提取文本，支持三种格式：
-/// - 字符串: "hello"
-/// - 数组: [{"type":"input_text","text":"..."}, {"type":"output_text","text":"..."}]
-/// - 其他: 跳过
-fn extract_content_text(content: Option<&serde_json::Value>) -> String {
-    let Some(val) = content else {
-        return String::new();
-    };
-    match val {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(arr) => {
-            let mut parts = Vec::new();
-            for item in arr {
-                // 提取 text / input_text / output_text 字段
-                let text = item
-                    .get("text")
-                    .or_else(|| item.get("input_text"))
-                    .or_else(|| item.get("output_text"))
-                    .and_then(|v| v.as_str());
-                if let Some(t) = text {
-                    if !t.is_empty() {
-                        parts.push(t.to_string());
-                    }
-                }
-            }
-            parts.join("\n")
-        }
-        _ => String::new(),
     }
 }
 
@@ -400,6 +881,97 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn resume_uses_the_source_home_and_quotes_shell_values() {
+        assert_eq!(
+            codex_resume_command("/tmp/it's a home/$(touch nope)", "session-id"),
+            "env CODEX_HOME='/tmp/it'\\''s a home/$(touch nope)' codex resume 'session-id'"
+        );
+    }
+
+    #[test]
+    fn windows_resume_encodes_environment_values_for_the_terminal() {
+        use base64::Engine;
+        let command = windows_codex_resume_command("C:\\my %PATH%\\it's home", "session-id");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(command.split_whitespace().last().unwrap())
+            .unwrap();
+        let utf16: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(
+            String::from_utf16(&utf16).unwrap(),
+            "$env:CODEX_HOME = 'C:\\my %PATH%\\it''s home'; & codex resume 'session-id'"
+        );
+    }
+
+    #[test]
+    fn scans_active_and_archived_sources_and_refreshes_cached_labels() {
+        let temp = tempdir().unwrap();
+        let active = temp.path().join("sessions/2026/10/26");
+        let archived = temp.path().join("archived_sessions");
+        for dir in [&active, &archived] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("rollout-session.jsonl"),
+                r#"{"type":"session_meta","payload":{"id":"shared-id","cwd":"/project"}}"#,
+            )
+            .unwrap();
+        }
+        let mut source = super::super::sources::SessionSource {
+            config: super::super::sources::SessionSourceConfig {
+                id: "dev".into(),
+                label: "开发".into(),
+                path: temp.path().to_string_lossy().into_owned(),
+                enabled: true,
+            },
+            is_default: false,
+            issue: None,
+        };
+        let first = scan_source_sessions(&[source.clone()]);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].source.as_ref().unwrap().label, "开发");
+        source.config.label = "SkillFlow Dev".into();
+        let renamed = scan_source_sessions(&[source.clone()]);
+        assert_eq!(renamed[0].source.as_ref().unwrap().label, "SkillFlow Dev");
+        source.config.enabled = false;
+        assert!(scan_source_sessions(&[source]).is_empty());
+        assert!(active.join("rollout-session.jsonl").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_sources_scan_each_physical_file_once() {
+        let temp = tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let original = sessions.join("rollout-original.jsonl");
+        std::fs::write(
+            &original,
+            r#"{"type":"session_meta","payload":{"id":"one"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&original, sessions.join("rollout-alias.jsonl")).unwrap();
+        let source = super::super::sources::SessionSource {
+            config: super::super::sources::SessionSourceConfig {
+                id: "dev".into(),
+                label: "开发".into(),
+                path: temp.path().to_string_lossy().into_owned(),
+                enabled: true,
+            },
+            is_default: false,
+            issue: None,
+        };
+        let sessions = scan_source_sessions(&[source.clone(), source]);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].source_path,
+            std::fs::canonicalize(original).unwrap().to_string_lossy()
+        );
+    }
+
     #[test]
     fn extract_uuid_from_rollout_filename() {
         let uuid = extract_uuid_from_filename(
@@ -425,16 +997,17 @@ mod tests {
         )
         .expect("write");
 
-        let meta = extract_session_meta(
-            &source,
-            "rollout-2026-08-07T17-20-50-current.jsonl",
-        )
-        .expect("meta");
+        let meta = extract_session_meta(&source, "rollout-2026-08-07T17-20-50-current.jsonl")
+            .expect("meta");
 
         assert_eq!(meta.session_id, "current-session");
-        assert_eq!(meta.resume_command.as_deref(), Some("codex resume current-session"));
+        assert_eq!(
+            meta.resume_command.as_deref(),
+            Some("codex resume current-session")
+        );
         assert_eq!(meta.project_dir.as_deref(), Some("/current"));
         assert_eq!(meta.title, "Build the thing");
+        assert_eq!(meta.source_file_path.as_deref(), source.to_str());
     }
 
     #[test]

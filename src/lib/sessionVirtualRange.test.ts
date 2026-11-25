@@ -54,13 +54,37 @@ describe("session virtual range", () => {
 
   it("retains measured heights for stable transcript items", () => {
     const previousItems = [
-      { role: "user", timestamp: 1, content: "draw a chart" },
-      { role: "assistant", timestamp: 2, content: "done" },
+      {
+        id: "1",
+        category: "user",
+        importance: "primary",
+        title: "User",
+        role: "user",
+        timestamp: 1,
+        content: "draw a chart",
+      },
+      {
+        id: "2",
+        category: "assistant",
+        importance: "primary",
+        title: "Assistant",
+        role: "assistant",
+        timestamp: 2,
+        content: "done",
+      },
     ];
     const nextItems = [
       previousItems[0],
       previousItems[1],
-      { role: "assistant", timestamp: 3, content: "next" },
+      {
+        id: "3",
+        category: "assistant",
+        importance: "primary",
+        title: "Assistant",
+        role: "assistant",
+        timestamp: 3,
+        content: "next",
+      },
     ];
 
     expect(
@@ -76,12 +100,44 @@ describe("session virtual range", () => {
     const retained = retainMeasuredHeightsForStableItems({
       currentHeights: { 0: 64, 1: 320 },
       previousItems: [
-        { role: "user", timestamp: 1, content: "draw a chart" },
-        { role: "assistant", timestamp: 2, content: "old" },
+        {
+          id: "1",
+          category: "user",
+          importance: "primary",
+          title: "User",
+          role: "user",
+          timestamp: 1,
+          content: "draw a chart",
+        },
+        {
+          id: "2",
+          category: "assistant",
+          importance: "primary",
+          title: "Assistant",
+          role: "assistant",
+          timestamp: 2,
+          content: "old",
+        },
       ],
       nextItems: [
-        { role: "user", timestamp: 1, content: "draw a chart" },
-        { role: "assistant", timestamp: 2, content: "new" },
+        {
+          id: "1",
+          category: "user",
+          importance: "primary",
+          title: "User",
+          role: "user",
+          timestamp: 1,
+          content: "draw a chart",
+        },
+        {
+          id: "2",
+          category: "assistant",
+          importance: "primary",
+          title: "Assistant",
+          role: "assistant",
+          timestamp: 2,
+          content: "new",
+        },
       ],
     });
 

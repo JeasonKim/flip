@@ -75,11 +75,10 @@ export default function SessionList({
               </span>
             </div>
             {/* 项目路径 */}
-            {s.project_dir && (
-              <p className="text-[10px] text-gray-500 truncate mt-0.5 pl-7">
-                {s.project_dir}
-              </p>
-            )}
+            <div className="mt-1 flex min-w-0 items-center gap-2 pl-7">
+              {s.source && <span title={s.source.label} className="max-w-32 shrink-0 truncate rounded bg-sky-400/10 px-1.5 py-0.5 text-[10px] text-sky-300">{s.source.label}</span>}
+              {s.project_dir && <span title={s.project_dir} className="min-w-0 truncate text-[10px] text-gray-500">{s.project_dir}</span>}
+            </div>
           </button>
         ))}
       </div>

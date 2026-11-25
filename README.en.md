@@ -28,6 +28,12 @@ Flip keeps account switching close to where you work:
 
 The session view helps you review historical `Claude Code` and `Codex` conversations, filter by agent, inspect message details, clean old records, and resume a session from its original context.
 
+Open “系统提示词” (system prompts) in a Claude Code, Codex, or OpenCode session to read, search, and copy its recorded prompts. Explicitly configured or supplied prompts appear first when their origin is recorded. The selected prompt shows its origin, role, and line or message number.
+
+Use “采集目录” (collection directories) in the session window to add multiple Codex data roots and give each a source label. Labels appear in the list and details; source and agent filters work together. Flip includes `~/.codex` by default and scans each root's `sessions` and `archived_sessions` directories.
+
+Source settings live in `~/.flip/session-sources.yaml`. You can rename, disable, or remove custom sources while retaining their files. Custom directories are read-only collection sources; history cleanup applies to the built-in directories. Resuming a custom-source session uses its corresponding `CODEX_HOME`.
+
 ## Workflow
 
 ```mermaid
@@ -123,5 +129,6 @@ docs/                README assets
 ## Notes
 
 - Flip stores saved profiles in `~/.flip/profiles.yaml`
+- Session directories and source labels are stored in `~/.flip/session-sources.yaml`
 - The app focuses on local account switching rather than cloud-side account management
 - Current releases are packaged for `macOS` and `Windows`

@@ -147,7 +147,12 @@ pub fn run() {
             commands::read_model_info,
             commands::rename_account,
             commands::scan_sessions,
+            commands::list_session_sources,
+            commands::configure_session_sources,
             commands::load_session_messages,
+            commands::load_session_timeline,
+            commands::load_session_system_prompts,
+            commands::load_session_entry_raw,
             commands::read_session_source_revision,
             commands::load_session_raw_content,
             commands::resume_session,
@@ -156,6 +161,8 @@ pub fn run() {
             commands::import_from_ccswitch,
             commands::enroll_api_account,
             commands::reveal_config_file,
+            commands::open_session_resource,
+            commands::reveal_session_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flip");
